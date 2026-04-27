@@ -1,4 +1,4 @@
 .env
 easystock-api/.env
 
-easyStock/node_modules/
+node_modules/
