@@ -1,2 +1,4 @@
 .env
 easystock-api/.env
+
+easyStock/node_modules/
