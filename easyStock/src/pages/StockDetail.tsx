@@ -45,11 +45,13 @@ export function StockDetail() {
 
   const roeSpark = useMemo(() => {
     if (!stock) return null;
-    const vals = stock.roeSeries.map((x) => x.roe);
+    const series = stock.roeSeries;
+    if (!Array.isArray(series) || series.length === 0) return null;
+    const vals = series.map((x) => x.roe);
     const max = Math.max(...vals);
     const min = Math.min(...vals);
     const span = max - min || 1;
-    return stock.roeSeries.map((x, i) => ({
+    return series.map((x, i) => ({
       ...x,
       h: ((x.roe - min) / span) * 100,
       i,
@@ -87,7 +89,8 @@ export function StockDetail() {
     );
   }
 
-  const peVsSector = ((stock.pe - stock.sectorAvgPe) / stock.sectorAvgPe) * 100;
+  const peVsSector =
+    stock.sectorAvgPe > 0 ? ((stock.pe - stock.sectorAvgPe) / stock.sectorAvgPe) * 100 : 0;
 
   return (
     <>
@@ -247,16 +250,24 @@ export function StockDetail() {
                 </tr>
               </thead>
               <tbody>
-                {stock.shareholders.map((s) => (
-                  <tr key={s.end}>
-                    <td>{s.end}</td>
-                    <td>{s.holders.toLocaleString()}</td>
-                    <td className={s.changePct >= 0 ? "positive" : "negative"}>
-                      {s.changePct >= 0 ? "+" : ""}
-                      {s.changePct}%
+                {stock.shareholders.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="panel-empty-hint">
+                      暂无股东人数数据（Tushare stk_holdernumber，需积分权限或该股未披露）
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  stock.shareholders.map((s) => (
+                    <tr key={s.end}>
+                      <td>{s.end}</td>
+                      <td>{s.holders.toLocaleString()}</td>
+                      <td className={s.changePct >= 0 ? "positive" : "negative"}>
+                        {s.changePct >= 0 ? "+" : ""}
+                        {s.changePct}%
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
             <h4 className="panel-subtitle">分红</h4>
@@ -269,13 +280,21 @@ export function StockDetail() {
                 </tr>
               </thead>
               <tbody>
-                {stock.dividends.map((d) => (
-                  <tr key={d.year}>
-                    <td>{d.year}</td>
-                    <td>{d.per10}</td>
-                    <td>{d.yield}</td>
+                {stock.dividends.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="panel-empty-hint">
+                      暂无分红数据（Tushare dividend，历史送转/现金分红）
+                    </td>
                   </tr>
-                ))}
+                ) : (
+                  stock.dividends.map((d) => (
+                    <tr key={d.year + d.per10}>
+                      <td>{d.year}</td>
+                      <td>{d.per10}</td>
+                      <td>{d.yield}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </>
@@ -285,18 +304,26 @@ export function StockDetail() {
             <thead>
               <tr>
                 <th>日期</th>
-                <th>主力净流入（百万）</th>
-                <th>北向（百万）</th>
+                <th>全日净流入（百万）</th>
+                <th title="大单+特大单买入减卖出，万元口径折算百万">大单+特大单净额（百万）</th>
               </tr>
             </thead>
             <tbody>
-              {stock.flows.map((f) => (
-                <tr key={f.date}>
-                  <td>{f.date}</td>
-                  <td className={f.mainNet >= 0 ? "positive" : "negative"}>{f.mainNet}</td>
-                  <td className={f.north >= 0 ? "positive" : "negative"}>{f.north}</td>
+              {stock.flows.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="panel-empty-hint">
+                    暂无资金流向数据（Tushare moneyflow，需积分权限）
+                  </td>
                 </tr>
-              ))}
+              ) : (
+                stock.flows.map((f) => (
+                  <tr key={f.date}>
+                    <td>{f.date}</td>
+                    <td className={f.mainNet >= 0 ? "positive" : "negative"}>{f.mainNet}</td>
+                    <td className={f.north >= 0 ? "positive" : "negative"}>{f.north}</td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         )}

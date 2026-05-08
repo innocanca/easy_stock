@@ -98,6 +98,19 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 		)
 	}
 
+	sh := stockShareholdersTab(c, tsCode, date)
+	if sh == nil {
+		sh = []map[string]any{}
+	}
+	div := stockDividendsTab(c, tsCode)
+	if div == nil {
+		div = []map[string]any{}
+	}
+	fl := stockFlowsTab(c, tsCode, date)
+	if fl == nil {
+		fl = []map[string]any{}
+	}
+
 	detail := map[string]any{
 		"code":             tsCode,
 		"name":             name,
@@ -116,9 +129,9 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 		"revenueGrowth":    []map[string]any{},
 		"financeRows":      financeRows,
 		"businessSegments": []map[string]any{},
-		"shareholders":     []map[string]any{},
-		"dividends":        []map[string]any{},
-		"flows":            []map[string]any{},
+		"shareholders":     sh,
+		"dividends":        div,
+		"flows":            fl,
 		"news":             []map[string]any{},
 	}
 

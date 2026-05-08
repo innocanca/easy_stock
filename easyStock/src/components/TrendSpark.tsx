@@ -1,4 +1,4 @@
-import type { PickItem } from "@/data/mock";
+import type { PickItem } from "@shared/dataset";
 
 function SparkBars({
   values,
@@ -36,7 +36,7 @@ export function TrendSpark({ item }: { item: PickItem }) {
   return (
     <div className="spark-wrap">
       <div className="spark-box">
-        <h4>利润趋势（示意）</h4>
+        <h4>利润趋势（最近四季，亿元）</h4>
         <SparkBars values={profits} color="var(--accent)" />
         <div className="spark-caption">{item.profitTrend.map((x) => x.q).join(" → ")}</div>
       </div>

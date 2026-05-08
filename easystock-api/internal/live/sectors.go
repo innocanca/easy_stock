@@ -89,13 +89,7 @@ func buildSectorBundle(c *tushare.Client) (*sectorBundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.Call("daily_basic", map[string]any{
-		"trade_date": date,
-	}, "ts_code,pe_ttm,pb,total_mv")
-	if err != nil {
-		return nil, fmt.Errorf("daily_basic: %w", err)
-	}
-	rows, err := tushare.RowsToMaps(resp)
+	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm,pb,total_mv")
 	if err != nil {
 		return nil, err
 	}

@@ -40,7 +40,7 @@ func main() {
 			writeError(w, http.StatusServiceUnavailable, "TUSHARE_TOKEN is required (mock fallback disabled)")
 			return
 		}
-		b, err := live.PicksJSON(tc)
+		b, err := live.PicksJSON(tc, r.URL.Query())
 		if err != nil {
 			log.Printf("tushare picks: %v", err)
 			writeError(w, http.StatusBadGateway, err.Error())
