@@ -2,3 +2,7 @@
 easystock-api/.env
 
 node_modules/
+
+# Annual report data (uploaded PDFs + analysis results)
+easystock-api/data/
+easystock-api/scripts/node_modules/

@@ -4,6 +4,7 @@ import { fetchSectorList } from "@/api/stockApi";
 import { Layout } from "@/components/Layout";
 import { Chain } from "@/pages/Chain";
 import { Home } from "@/pages/Home";
+import { Report } from "@/pages/Report";
 import { Sector } from "@/pages/Sector";
 import { StockDetail } from "@/pages/StockDetail";
 
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="sector" element={<SectorIndexRedirect />} />
           <Route path="sector/:id" element={<Sector />} />
           <Route path="chain" element={<Chain />} />
+          <Route path="report" element={<Report />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

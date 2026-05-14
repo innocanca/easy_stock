@@ -21,6 +21,9 @@ export function Layout() {
           <NavLink to="/chain" className={({ isActive }) => (isActive ? "active" : "")}>
             产业链
           </NavLink>
+          <NavLink to="/report" className={({ isActive }) => (isActive ? "active" : "")}>
+            年报分析
+          </NavLink>
         </nav>
         <p className="sidebar-footnote">
           本地开发：先启动 easystock-api（Go，:4000），再运行 npm run dev；前端通过 /api 代理拉取数据。

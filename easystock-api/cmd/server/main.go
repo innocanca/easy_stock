@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"easystock/api/internal/live"
+	"easystock/api/internal/report"
 	"easystock/api/internal/tushare"
 
 	"github.com/joho/godotenv"
@@ -101,6 +102,18 @@ func main() {
 		writeJSON(w, b)
 	})
 
+	rh := report.NewHandler()
+	mux.HandleFunc("POST /api/reports/upload", rh.HandleUpload)
+	mux.HandleFunc("GET /api/reports/{stock_code}", rh.HandleList)
+	mux.HandleFunc("GET /api/reports/{stock_code}/analysis", rh.HandleAnalysis)
+	mux.HandleFunc("DELETE /api/reports/{stock_code}/{year}", rh.HandleDelete)
+
+	if rh.AI.Ready() {
+		log.Printf("Report AI: ready — %s", rh.AI.ProviderInfo())
+	} else {
+		log.Printf("Report AI: neither CURSOR_API_KEY nor AI_API_KEY is set — upload/analysis endpoints will return 503")
+	}
+
 	addr := ":4000"
 	if p := os.Getenv("PORT"); p != "" {
 		p = strings.TrimSpace(p)
@@ -142,7 +155,7 @@ func loadDotEnv() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
