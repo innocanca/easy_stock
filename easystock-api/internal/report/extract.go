@@ -8,6 +8,24 @@ import (
 
 const maxTextLen = 80000
 
+// MaxRunesForAI caps how much report text is sent to the model to reduce
+// context overflows and timeouts while keeping the head of the document
+// (where key metrics usually appear).
+const MaxRunesForAI = 52000
+
+// MaxRunesForJSONExtract is slightly smaller to leave room for system prompt
+// and the model's JSON response.
+const MaxRunesForJSONExtract = 38000
+
+func ClampReportText(s string, maxRunes int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return strings.TrimSpace(string(r[:maxRunes]) + "\n\n（后文已省略，分析仅依据以上片段。）")
+}
+
 func ExtractPDFText(filepath string) (string, error) {
 	f, r, err := pdf.Open(filepath)
 	if err != nil {

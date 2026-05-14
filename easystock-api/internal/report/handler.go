@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Handler struct {
@@ -31,11 +32,6 @@ func sseEvent(w http.ResponseWriter, event, data string) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-}
-
-func sseJSON(w http.ResponseWriter, event string, v any) {
-	b, _ := json.Marshal(v)
-	sseEvent(w, event, string(b))
 }
 
 // sseQuoted sends a JSON-encoded string as one SSE data line (safe for newlines).
@@ -109,7 +105,8 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("report: sending to AI for analysis (%s %d)", stockCode, year)
-	data, err := h.AI.ExtractFinancials(pdfText, stockCode, stockName, year)
+	extractBody := ClampReportText(pdfText, MaxRunesForJSONExtract)
+	data, err := h.AI.ExtractFinancials(extractBody, stockCode, stockName, year)
 	if err != nil {
 		log.Printf("report: AI extraction failed: %v", err)
 		writeErr(w, http.StatusBadGateway, "AI analysis failed: "+err.Error())
@@ -195,30 +192,17 @@ func (h *Handler) HandleUploadStream(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("report: extracted %d chars from PDF", len(pdfText))
 	}
-	sseQuoted(w, "status", fmt.Sprintf("已提取 %d 字符，正在AI分析财务数据…", len(pdfText)))
 
-	// Step 1: Extract financials (non-streaming, result needed as JSON)
-	data, err := h.AI.ExtractFinancials(pdfText, stockCode, stockName, year)
-	if err != nil {
-		log.Printf("report: AI extraction failed: %v", err)
-		sseQuoted(w, "error", "AI财务数据提取失败: "+err.Error())
-		return
-	}
-	if err := h.Store.SaveReport(data); err != nil {
-		sseQuoted(w, "error", "save report: "+err.Error())
-		return
-	}
-	sseJSON(w, "data", data)
-	log.Printf("report: financial data extracted for %s %d", stockCode, year)
+	streamBody := ClampReportText(pdfText, MaxRunesForAI)
+	sseQuoted(w, "status", fmt.Sprintf("已提取文本，送入模型约 %d 字（已截断超长部分），正在流式生成核心摘要…", utf8.RuneCountInString(streamBody)))
 
-	// Step 2: Generate Wiki (streaming)
-	sseQuoted(w, "status", "正在生成知识Wiki…")
-
+	// Step 1: Stream core summary (Markdown) — primary path; avoids blocking on strict JSON.
 	existingWiki, _ := h.Store.MergeWikisExceptYear(stockCode, year)
 	hasContext := existingWiki != ""
-	systemPrompt := h.AI.WikiSystemPrompt(hasContext)
-	userMsg := h.AI.WikiUserMsg(pdfText, stockName, stockCode, year, existingWiki)
+	systemPrompt := h.AI.SummaryStreamSystemPrompt(hasContext)
+	userMsg := h.AI.WikiUserMsg(streamBody, stockName, stockCode, year, existingWiki)
 
+	sseQuoted(w, "status", "正在流式输出核心摘要…")
 	wikiCh := make(chan string, 64)
 	var wikiErr error
 	go func() {
@@ -232,8 +216,8 @@ func (h *Handler) HandleUploadStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if wikiErr != nil {
-		log.Printf("report: wiki generation failed: %v", wikiErr)
-		sseQuoted(w, "error", "Wiki生成失败: "+wikiErr.Error())
+		log.Printf("report: stream summary failed: %v", wikiErr)
+		sseQuoted(w, "error", "核心摘要生成失败: "+wikiErr.Error())
 		return
 	}
 
@@ -246,8 +230,9 @@ func (h *Handler) HandleUploadStream(w http.ResponseWriter, r *http.Request) {
 	if err := h.Store.SaveWiki(stockCode, year, wikiContent); err != nil {
 		log.Printf("report: save wiki failed: %v", err)
 	}
-
-	log.Printf("report: wiki generated for %s %d (%d chars)", stockCode, year, len(wikiContent))
+	log.Printf("report: stream summary saved for %s %d (%d chars)", stockCode, year, len(wikiContent))
+	sseQuoted(w, "status", "核心摘要已保存至知识库")
+	log.Printf("report: upload stream finished for %s %d", stockCode, year)
 	sseQuoted(w, "done", "ok")
 }
 
