@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"easystock/api/internal/live"
 	"easystock/api/internal/report"
@@ -36,6 +37,27 @@ func main() {
 		_, _ = w.Write([]byte(`{"ok":true,"tushare":` + tok + `}`))
 	})
 
+	// GET /api/tushare/ping — 单次最轻 trade_cal，总额 10s，用于区分「到 Tushare 不通」与「某个重接口超时」。
+	mux.HandleFunc("GET /api/tushare/ping", func(w http.ResponseWriter, _ *http.Request) {
+		if tc == nil {
+			writeError(w, http.StatusServiceUnavailable, "TUSHARE_TOKEN is required (mock fallback disabled)")
+			return
+		}
+		took, err := tc.PingTradeCal(10 * time.Second)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		out := map[string]any{
+			"ok":       true,
+			"took_ms":  took.Milliseconds(),
+			"base_url": tc.EffectiveBaseURL(),
+			"api":      "trade_cal",
+		}
+		b, _ := json.Marshal(out)
+		writeJSON(w, b)
+	})
+
 	mux.HandleFunc("GET /api/picks", func(w http.ResponseWriter, r *http.Request) {
 		if tc == nil {
 			writeError(w, http.StatusServiceUnavailable, "TUSHARE_TOKEN is required (mock fallback disabled)")
@@ -44,7 +66,7 @@ func main() {
 		b, err := live.PicksJSON(tc, r.URL.Query())
 		if err != nil {
 			log.Printf("tushare picks: %v", err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, tc.FormatErrWithTimeoutProbe(err))
 			return
 		}
 		writeJSON(w, b)
@@ -58,7 +80,7 @@ func main() {
 		b, err := live.SectorsJSON(tc)
 		if err != nil {
 			log.Printf("tushare sectors: %v", err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, tc.FormatErrWithTimeoutProbe(err))
 			return
 		}
 		writeJSON(w, b)
@@ -77,7 +99,7 @@ func main() {
 				return
 			}
 			log.Printf("tushare sector %s: %v", id, err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, tc.FormatErrWithTimeoutProbe(err))
 			return
 		}
 		writeJSON(w, b)
@@ -96,7 +118,7 @@ func main() {
 				return
 			}
 			log.Printf("tushare stock %s: %v", code, err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusBadGateway, tc.FormatErrWithTimeoutProbe(err))
 			return
 		}
 		writeJSON(w, b)
@@ -104,9 +126,15 @@ func main() {
 
 	rh := report.NewHandler()
 	mux.HandleFunc("POST /api/reports/upload", rh.HandleUpload)
+	mux.HandleFunc("POST /api/reports/upload/stream", rh.HandleUploadStream)
 	mux.HandleFunc("GET /api/reports/{stock_code}", rh.HandleList)
 	mux.HandleFunc("GET /api/reports/{stock_code}/analysis", rh.HandleAnalysis)
 	mux.HandleFunc("DELETE /api/reports/{stock_code}/{year}", rh.HandleDelete)
+
+	mux.HandleFunc("GET /api/wiki", rh.HandleWikiList)
+	mux.HandleFunc("GET /api/wiki/{stock_code}/meta", rh.HandleWikiMeta)
+	mux.HandleFunc("GET /api/wiki/{stock_code}/{year}", rh.HandleWikiYear)
+	mux.HandleFunc("GET /api/wiki/{stock_code}", rh.HandleWiki)
 
 	if rh.AI.Ready() {
 		log.Printf("Report AI: ready — %s", rh.AI.ProviderInfo())

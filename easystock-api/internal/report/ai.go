@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -99,27 +100,41 @@ type cursorInput struct {
 	Model  string `json:"model"`
 }
 
-func (c *AIClient) callCursor(system, user string) (string, error) {
+func (c *AIClient) buildCursorCmd(ctx context.Context, system, user string, stream bool) (*exec.Cmd, string, error) {
 	input := cursorInput{System: system, User: user, Model: c.CursorModel}
 	inputJSON, _ := json.Marshal(input)
 
 	tmpFile, err := os.CreateTemp("", "cursor-input-*.json")
 	if err != nil {
-		return "", fmt.Errorf("create temp: %w", err)
+		return nil, "", fmt.Errorf("create temp: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
 	if _, err := tmpFile.Write(inputJSON); err != nil {
 		tmpFile.Close()
-		return "", err
+		os.Remove(tmpFile.Name())
+		return nil, "", err
 	}
 	tmpFile.Close()
 
 	scriptPath := filepath.Join(c.ScriptDir, "cursor-analyze.mjs")
+	args := []string{scriptPath, tmpFile.Name()}
+	if stream {
+		args = append(args, "--stream")
+	}
+
+	cmd := exec.CommandContext(ctx, c.NodeBin, args...)
+	cmd.Env = append(os.Environ(), "CURSOR_API_KEY="+c.CursorAPIKey)
+	return cmd, tmpFile.Name(), nil
+}
+
+func (c *AIClient) callCursor(system, user string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.NodeBin, scriptPath, tmpFile.Name())
-	cmd.Env = append(os.Environ(), "CURSOR_API_KEY="+c.CursorAPIKey)
+	cmd, tmpPath, err := c.buildCursorCmd(ctx, system, user, false)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmpPath)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -132,12 +147,61 @@ func (c *AIClient) callCursor(system, user string) (string, error) {
 	return stdout.String(), nil
 }
 
+func (c *AIClient) callCursorStream(system, user string, ch chan<- string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd, tmpPath, err := c.buildCursorCmd(ctx, system, user, true)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+	var stderrBuf bytes.Buffer
+	go func() { _, _ = io.Copy(&stderrBuf, stderrPipe) }()
+
+	log.Printf("report/ai: calling cursor-sdk stream (%s)", c.CursorModel)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+
+	rd := bufio.NewReader(stdout)
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := rd.Read(buf)
+		if n > 0 {
+			ch <- string(buf[:n])
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			_ = cmd.Process.Kill()
+			return fmt.Errorf("read stdout: %w", readErr)
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("cursor-sdk failed: %w\nstderr: %s", err, stderrBuf.String())
+	}
+	return nil
+}
+
 // ---- HTTP API mode (DeepSeek / OpenAI compatible) ----
 
 type chatReq struct {
 	Model          string      `json:"model"`
 	Messages       []chatMsg   `json:"messages"`
 	Temperature    float64     `json:"temperature"`
+	Stream         bool        `json:"stream,omitempty"`
 	ResponseFormat *respFormat `json:"response_format,omitempty"`
 }
 
@@ -155,6 +219,14 @@ type chatResp struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+	} `json:"choices"`
+}
+
+type streamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
 	} `json:"choices"`
 }
 
@@ -204,6 +276,78 @@ func (c *AIClient) callHTTP(system, user string, jsonMode bool) (string, error) 
 		return "", fmt.Errorf("no choices returned")
 	}
 	return strings.TrimSpace(cr.Choices[0].Message.Content), nil
+}
+
+func (c *AIClient) callHTTPStream(system, user string, ch chan<- string) error {
+	body := chatReq{
+		Model:       c.Model,
+		Temperature: 0.1,
+		Stream:      true,
+		Messages: []chatMsg{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, truncBody(b))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var chunk streamChunk
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != "" {
+				ch <- choice.Delta.Content
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+// ---- Streaming public methods ----
+
+// CallStream invokes AI with streaming, sending chunks to ch. Closes ch when done.
+func (c *AIClient) CallStream(system, user string, ch chan<- string) error {
+	defer close(ch)
+	switch c.Mode {
+	case "cursor":
+		return c.callCursorStream(system, user, ch)
+	case "http":
+		return c.callHTTPStream(system, user, ch)
+	default:
+		return fmt.Errorf("no AI provider configured")
+	}
 }
 
 // ---- Public methods ----
@@ -302,6 +446,65 @@ func (c *AIClient) MultiYearAnalysis(reports []ReportData) (string, error) {
 		return "", fmt.Errorf("no AI provider configured")
 	}
 }
+
+// ---- Wiki generation ----
+
+const wikiPrompt = `你是一位资深证券分析师，同时也是一位出色的知识整理专家。请将以下年度报告内容整理成一份结构清晰的Markdown知识Wiki页面。
+
+要求：
+1. 使用Markdown格式，结构清晰，包含以下章节：
+   - ## 公司概况（简介、主营业务、行业地位）
+   - ## 经营分析（本年度经营情况、重大事项、战略进展）
+   - ## 财务分析（收入利润、盈利能力、现金流、资产负债）
+   - ## 业务构成（各产品/业务线收入占比及变化）
+   - ## 风险因素（主要风险及应对措施）
+   - ## 未来展望（发展规划、增长驱动力）
+2. 数据准确，引用报告中的关键数字
+3. 语言简洁专业，适合快速查阅
+4. 在每个章节内使用要点列表或简短段落
+
+直接返回Markdown内容，不要用代码块包裹。`
+
+const wikiPromptWithContext = `你是一位资深证券分析师，同时也是一位出色的知识整理专家。请将以下年度报告内容整理成一份结构清晰的Markdown知识Wiki页面。
+
+你已经有该公司以往年份的知识库内容（见下方"已有知识库"部分），请在生成本年度Wiki时：
+1. 与历史数据做对比分析，标注关键指标的同比变化
+2. 延续已有知识库的分析框架和关注点
+3. 如发现趋势性变化或重大转折，特别标注
+
+Wiki格式要求：
+1. 使用Markdown格式，结构清晰，包含以下章节：
+   - ## 公司概况（简介、主营业务、行业地位）
+   - ## 经营分析（本年度经营情况、重大事项、战略进展，与往年对比）
+   - ## 财务分析（收入利润、盈利能力、现金流、资产负债，标注同比变化）
+   - ## 业务构成（各产品/业务线收入占比及变化趋势）
+   - ## 风险因素（主要风险及应对措施，与往年对比是否有新增风险）
+   - ## 未来展望（发展规划、增长驱动力）
+2. 数据准确，引用报告中的关键数字
+3. 语言简洁专业，适合快速查阅
+
+直接返回Markdown内容，不要用代码块包裹。`
+
+func (c *AIClient) WikiUserMsg(pdfText, stockName, stockCode string, year int, existingWiki string) string {
+	var sb strings.Builder
+	if existingWiki != "" {
+		sb.WriteString("## 已有知识库\n\n")
+		sb.WriteString(existingWiki)
+		sb.WriteString("\n\n---\n\n")
+	}
+	sb.WriteString(fmt.Sprintf("## %s（%s）%d年年度报告\n\n", stockName, stockCode, year))
+	sb.WriteString(pdfText)
+	return sb.String()
+}
+
+func (c *AIClient) WikiSystemPrompt(hasContext bool) string {
+	if hasContext {
+		return wikiPromptWithContext
+	}
+	return wikiPrompt
+}
+
+// ---- Utilities ----
 
 func extractJSONObject(s string) string {
 	start := strings.Index(s, "{")

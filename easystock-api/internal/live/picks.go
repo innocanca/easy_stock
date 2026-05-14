@@ -195,7 +195,7 @@ func buildPicksFull(c *tushare.Client, minMvWan float64) ([]pickItem, error) {
 
 	out := make([]pickItem, len(list))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, PicksConcurrency())
 	for i := range list {
 		wg.Add(1)
 		go func(idx int) {

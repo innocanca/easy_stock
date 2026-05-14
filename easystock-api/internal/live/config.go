@@ -99,3 +99,20 @@ func MaxSectors() int {
 func TradeDate() string {
 	return strings.TrimSpace(os.Getenv("TUSHARE_TRADE_DATE"))
 }
+
+// PicksConcurrency limits parallel Tushare calls while building /api/picks (reduces gateway 504s).
+func PicksConcurrency() int {
+	const def = 4
+	s := strings.TrimSpace(os.Getenv("TUSHARE_PICKS_CONCURRENCY"))
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return def
+	}
+	if n > 16 {
+		return 16
+	}
+	return n
+}

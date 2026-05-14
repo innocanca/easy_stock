@@ -1,17 +1,20 @@
 /**
  * Bridge script: Go backend calls this via subprocess to use Cursor SDK for AI analysis.
  *
- * Usage:   node cursor-analyze.mjs <input.json>
+ * Usage:   node cursor-analyze.mjs <input.json> [--stream]
  * Input:   { "system": "...", "user": "...", "model": "claude-sonnet-4-6" }
- * Output:  AI response text to stdout
+ * Output:  AI response text to stdout (--stream: writes chunks as they arrive)
  * Env:     CURSOR_API_KEY required
  */
 import { readFileSync } from "fs";
 import { Agent } from "@cursor/sdk";
 
-const inputPath = process.argv[2];
+const args = process.argv.slice(2);
+const streamMode = args.includes("--stream");
+const inputPath = args.find((a) => !a.startsWith("--"));
+
 if (!inputPath) {
-  process.stderr.write("usage: node cursor-analyze.mjs <input.json>\n");
+  process.stderr.write("usage: node cursor-analyze.mjs <input.json> [--stream]\n");
   process.exit(1);
 }
 
@@ -39,18 +42,22 @@ try {
     if (event.type === "assistant" && event.message?.content) {
       for (const block of event.message.content) {
         if (block.type === "text") {
-          result += block.text;
+          if (streamMode) {
+            process.stdout.write(block.text);
+          } else {
+            result += block.text;
+          }
         }
       }
     }
   }
 
-  // Fallback: check run.result if stream didn't capture text
-  if (!result && run.result) {
-    result = run.result;
+  if (!streamMode) {
+    if (!result && run.result) {
+      result = run.result;
+    }
+    process.stdout.write(result);
   }
-
-  process.stdout.write(result);
 } finally {
   agent.close();
 }

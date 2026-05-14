@@ -14,10 +14,11 @@ import {
   deleteReport,
   fetchAnalysis,
   fetchReportList,
-  uploadReport,
+  uploadReportStream,
   type AnalysisResult,
   type ReportData,
 } from "@/api/reportApi";
+import { MarkdownBody } from "@/components/MarkdownBody";
 
 const COLORS = {
   revenue: "#2563eb",
@@ -54,6 +55,9 @@ export function Report() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadYear, setUploadYear] = useState(2024);
+  const [streamOpen, setStreamOpen] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("");
+  const [streamWiki, setStreamWiki] = useState("");
 
   const loadReports = useCallback(async () => {
     setLoading(true);
@@ -80,14 +84,22 @@ export function Report() {
     if (!files || files.length === 0) return;
     setUploading(uploadYear);
     setError("");
+    setStreamOpen(true);
+    setStreamStatus("");
+    setStreamWiki("");
     try {
-      const resp = await uploadReport(stockCode, stockName, uploadYear, files[0]);
-      if (resp.data) {
-        setReports((prev) => {
-          const filtered = prev.filter((r) => r.year !== resp.data!.year);
-          return [...filtered, resp.data!].sort((a, b) => a.year - b.year);
-        });
-      }
+      await uploadReportStream(stockCode, stockName, uploadYear, files[0], {
+        onStatus: (m) => setStreamStatus(m),
+        onWikiChunk: (c) => setStreamWiki((w) => w + c),
+        onData: (data) => {
+          setReports((prev) => {
+            const filtered = prev.filter((r) => r.year !== data.year);
+            return [...filtered, data].sort((a, b) => a.year - b.year);
+          });
+        },
+        onDone: () => setStreamStatus((s) => (s ? `${s} · 已完成` : "已完成")),
+        onError: (m) => setError(m),
+      });
       if (fileRef.current) fileRef.current.value = "";
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "上传失败");
@@ -206,13 +218,47 @@ export function Report() {
             disabled={uploading !== null}
           >
             {uploading !== null
-              ? `AI分析中 (${uploading})…`
+              ? `分析中 (${uploading})…`
               : "上传并分析"}
           </button>
         </div>
       </div>
 
       {error && <div className="report-error">{error}</div>}
+
+      {streamOpen && (
+        <div
+          className="report-stream-backdrop"
+          role="presentation"
+          onClick={() => setStreamOpen(false)}
+        >
+          <div
+            className="report-stream-modal panel"
+            role="dialog"
+            aria-labelledby="report-stream-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="report-stream-head">
+              <h3 id="report-stream-title">流式分析</h3>
+              <button
+                type="button"
+                className="report-btn"
+                onClick={() => setStreamOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+            <p className="report-stream-status">{streamStatus || "准备中…"}</p>
+            <div className="report-stream-md">
+              {streamWiki ? (
+                <MarkdownBody markdown={streamWiki} />
+              ) : (
+                <p className="wiki-muted">Wiki 内容将在此实时显示…</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Uploaded years */}
       {reports.length > 0 && (

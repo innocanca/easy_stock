@@ -24,6 +24,9 @@ export function Layout() {
           <NavLink to="/report" className={({ isActive }) => (isActive ? "active" : "")}>
             年报分析
           </NavLink>
+          <NavLink to="/wiki" className={({ isActive }) => (isActive ? "active" : "")}>
+            知识库
+          </NavLink>
         </nav>
       </aside>
       <main className="main">
