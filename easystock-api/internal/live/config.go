@@ -23,6 +23,20 @@ func PickLimit() int {
 	return n
 }
 
+// DefaultMinMvWan 推荐列表总市值下限（万元）。默认 5_000_000 = 500 亿人民币（Tushare daily_basic.total_mv 单位为万元）。
+func DefaultMinMvWan() float64 {
+	const def = 5_000_000
+	s := strings.TrimSpace(os.Getenv("TUSHARE_PICK_MIN_MV_WAN"))
+	if s == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 {
+		return def
+	}
+	return v
+}
+
 func PicksCacheTTL() time.Duration {
 	const def = 5 * time.Minute
 	s := strings.TrimSpace(os.Getenv("TUSHARE_PICKS_CACHE_MINUTES"))

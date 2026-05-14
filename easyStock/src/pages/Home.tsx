@@ -1,19 +1,51 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { DimensionBars } from "@/components/DimensionBars";
 import { TrendSpark } from "@/components/TrendSpark";
-import type { PickItem } from "@shared/dataset";
-import { fetchPicks } from "@/api/stockApi";
+import { fetchPicks, type PicksPageResponse } from "@/api/stockApi";
+
+/** 与后端默认一致：500 亿人民币（万元） */
+const MIN_MV_WAN = 5_000_000;
+
+const PAGE_SIZE_OPTIONS = [8, 12, 16, 24] as const;
+
+const SCORE_PRESETS = [
+  { label: "不限", min: 1 },
+  { label: "≥ 60", min: 60 },
+  { label: "≥ 65", min: 65 },
+  { label: "≥ 70", min: 70 },
+  { label: "≥ 75", min: 75 },
+  { label: "≥ 80", min: 80 },
+  { label: "≥ 85", min: 85 },
+  { label: "≥ 90", min: 90 },
+] as const;
 
 export function Home() {
-  const [items, setItems] = useState<PickItem[] | null>(null);
+  const [data, setData] = useState<PicksPageResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(12);
+  const [scoreMin, setScoreMin] = useState(1);
 
   useEffect(() => {
     let cancel = false;
-    fetchPicks()
+    setErr(null);
+    fetchPicks({
+      page,
+      pageSize,
+      minMvWan: MIN_MV_WAN,
+      scoreMin,
+      scoreMax: 99,
+    })
       .then((d) => {
-        if (!cancel) setItems(d);
+        if (cancel) return;
+        setData(d);
+        const ps = d.pageSize > 0 ? d.pageSize : pageSize;
+        const maxPage =
+          Number.isFinite(ps) && ps >= 1 ? Math.max(1, Math.ceil(d.total / ps)) : 1;
+        if (Number.isFinite(maxPage) && d.page > maxPage) {
+          setPage(maxPage);
+        }
       })
       .catch((e: unknown) => {
         if (!cancel) setErr(e instanceof Error ? e.message : "加载失败");
@@ -21,14 +53,40 @@ export function Home() {
     return () => {
       cancel = true;
     };
-  }, []);
+  }, [page, pageSize, scoreMin]);
+
+  const totalPages = useMemo(() => {
+    if (!data) return 1;
+    const ps = data.pageSize > 0 ? data.pageSize : pageSize;
+    if (!Number.isFinite(ps) || ps < 1) return 1;
+    const n = Math.ceil(data.total / ps);
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  }, [data, pageSize]);
+
+  const pageOptions = useMemo(() => {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }, [totalPages]);
+
+  function onScorePreset(min: number) {
+    setScoreMin(min);
+    setPage(1);
+  }
+
+  function onPageSizeChange(n: number) {
+    setPageSize(n);
+    setPage(1);
+  }
+
+  function onPageSelect(p: number) {
+    setPage(p);
+  }
 
   if (err) {
     return (
       <div className="home-wrap">
         <header className="home-hero">
           <p className="home-eyebrow">今日精选</p>
-          <h1 className="page-title home-title">推荐组合</h1>
+          <h1 className="page-title home-title">推荐</h1>
         </header>
         <div className="home-error-panel" role="alert">
           <p className="home-error-title">暂时无法加载列表</p>
@@ -46,12 +104,12 @@ export function Home() {
     );
   }
 
-  if (items === null) {
+  if (data === null) {
     return (
       <div className="home-wrap">
         <header className="home-hero">
           <p className="home-eyebrow">今日精选</p>
-          <h1 className="page-title home-title">推荐组合</h1>
+          <h1 className="page-title home-title">推荐</h1>
           <p className="page-sub home-desc">正在拉取候选池与评分…</p>
         </header>
         <div className="pick-grid">
@@ -63,91 +121,156 @@ export function Home() {
     );
   }
 
+  const items = Array.isArray(data.items) ? data.items : [];
+
   return (
     <div className="home-wrap">
       <header className="home-hero">
         <p className="home-eyebrow">今日精选</p>
-        <h1 className="page-title home-title">推荐组合</h1>
-        <p className="page-sub home-desc">
-          按<strong>四维</strong>（价值 · 估值 · 确定性 · 成长）与盈利、PE 变化综合打分；数据由 Tushare 经 API 实时聚合。
+        <h1 className="page-title home-title">推荐</h1>
+        <p className="page-sub home-desc home-desc--muted">
+          市值 ≥ 500 亿人民币 · 按综合评分从高到低排序 · 可筛选分数并分页浏览
         </p>
       </header>
 
-      <div className="pick-grid">
-        {items.map((item, index) => {
-          const rank = index + 1;
-          return (
-            <article
-              key={item.code}
-              className={`pick-card${rank <= 3 ? ` pick-card--top pick-card--top-${rank}` : ""}`}
+      <div className="home-picks-toolbar">
+        <div className="home-picks-toolbar-row">
+          <label className="home-picks-field">
+            <span className="home-picks-label">综合分</span>
+            <select
+              className="home-picks-select"
+              value={scoreMin}
+              onChange={(e) => onScorePreset(Number(e.target.value))}
+              aria-label="筛选综合评分下限"
             >
-              <div className="pick-card-glow" aria-hidden />
-              <div className="pick-card-inner">
-                <header className="pick-card-head">
-                  <span className="pick-rank" title={`排名第 ${rank} 位`}>
-                    {rank}
-                  </span>
-                  <div className="pick-card-title-block">
-                    <h2 className="pick-stock-name">
-                      <Link to={`/stock/${encodeURIComponent(item.code)}`}>{item.name}</Link>
-                    </h2>
-                    <span className="pick-code-pill">{item.code}</span>
-                  </div>
-                  <div className="pick-score-wrap" title="综合分 · 满分 100">
-                    <span className="pick-score-ring">
-                      <span className="pick-score-value">{item.score}</span>
-                      <span className="pick-score-unit">分</span>
-                    </span>
-                  </div>
-                </header>
-
-                <div className="pick-stat-chips">
-                  <div className="pick-chip">
-                    <span className="pick-chip-label">PE</span>
-                    <span className="pick-chip-val">{item.pe}</span>
-                  </div>
-                  <div className="pick-chip">
-                    <span className="pick-chip-label">ROE</span>
-                    <span className="pick-chip-val">{item.roe}%</span>
-                  </div>
-                  <div className="pick-chip">
-                    <span className="pick-chip-label">利润同比</span>
-                    <span
-                      className={`pick-chip-val${item.profitGrowthYoy >= 0 ? " pick-chip-val--up" : " pick-chip-val--down"}`}
-                    >
-                      {item.profitGrowthYoy >= 0 ? "+" : ""}
-                      {item.profitGrowthYoy}%
-                    </span>
-                  </div>
-                </div>
-
-                <div className="pick-dim-section">
-                  <p className="pick-section-label">四维雷达</p>
-                  <DimensionBars dimensions={item.dimensions} />
-                </div>
-
-                <p className="pick-note-preview">{item.scoreNote}</p>
-
-                <details className="pick-expand pick-expand--styled">
-                  <summary>
-                    <span className="pick-expand-label">展开 · 盈利与 PE 走势</span>
-                    <span className="pick-expand-icon" aria-hidden />
-                  </summary>
-                  <div className="pick-expand-body">
-                    <TrendSpark item={item} />
-                    <Link className="pick-detail-cta" to={`/stock/${encodeURIComponent(item.code)}`}>
-                      查看个股详情
-                      <span aria-hidden className="pick-detail-cta-arrow">
-                        →
-                      </span>
-                    </Link>
-                  </div>
-                </details>
-              </div>
-            </article>
-          );
-        })}
+              {SCORE_PRESETS.map((p) => (
+                <option key={p.min} value={p.min}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="home-picks-field">
+            <span className="home-picks-label">每页</span>
+            <select
+              className="home-picks-select"
+              value={pageSize}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+              aria-label="每页条数"
+            >
+              {PAGE_SIZE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n} 条
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="home-picks-field">
+            <span className="home-picks-label">页码</span>
+            <select
+              className="home-picks-select"
+              value={Math.min(page, totalPages)}
+              onChange={(e) => onPageSelect(Number(e.target.value))}
+              aria-label="选择页码"
+              disabled={totalPages <= 1}
+            >
+              {pageOptions.map((p) => (
+                <option key={p} value={p}>
+                  第 {p} / {totalPages} 页
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="home-picks-meta">
+          共 <strong>{data.total}</strong> 只股票符合条件
+          {items.length > 0 ? (
+            <>
+              ，本页展示第 {(page - 1) * pageSize + 1}–{(page - 1) * pageSize + items.length} 名
+            </>
+          ) : null}
+        </p>
       </div>
+
+      {items.length === 0 ? (
+        <p className="home-picks-empty">当前筛选条件下暂无股票，请放宽综合分筛选。</p>
+      ) : (
+        <div className="pick-grid">
+          {items.map((item, index) => {
+            const rank = (page - 1) * pageSize + index + 1;
+            return (
+              <article
+                key={item.code}
+                className={`pick-card${rank <= 3 ? ` pick-card--top pick-card--top-${rank}` : ""}`}
+              >
+                <div className="pick-card-glow" aria-hidden />
+                <div className="pick-card-inner">
+                  <header className="pick-card-head">
+                    <span className="pick-rank" title={`排名第 ${rank} 位（全表排序）`}>
+                      {rank}
+                    </span>
+                    <div className="pick-card-title-block">
+                      <h2 className="pick-stock-name">
+                        <Link to={`/stock/${encodeURIComponent(item.code)}`}>{item.name}</Link>
+                      </h2>
+                      <span className="pick-code-pill">{item.code}</span>
+                    </div>
+                    <div className="pick-score-wrap" title="综合分 · 满分 100">
+                      <span className="pick-score-ring">
+                        <span className="pick-score-value">{item.score}</span>
+                        <span className="pick-score-unit">分</span>
+                      </span>
+                    </div>
+                  </header>
+
+                  <div className="pick-stat-chips">
+                    <div className="pick-chip">
+                      <span className="pick-chip-label">PE</span>
+                      <span className="pick-chip-val">{item.pe}</span>
+                    </div>
+                    <div className="pick-chip">
+                      <span className="pick-chip-label">ROE</span>
+                      <span className="pick-chip-val">{item.roe}%</span>
+                    </div>
+                    <div className="pick-chip">
+                      <span className="pick-chip-label">利润同比</span>
+                      <span
+                        className={`pick-chip-val${item.profitGrowthYoy >= 0 ? " pick-chip-val--up" : " pick-chip-val--down"}`}
+                      >
+                        {item.profitGrowthYoy >= 0 ? "+" : ""}
+                        {item.profitGrowthYoy}%
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="pick-dim-section">
+                    <p className="pick-section-label">四维雷达</p>
+                    <DimensionBars dimensions={item.dimensions} />
+                  </div>
+
+                  <p className="pick-note-preview">{item.scoreNote}</p>
+
+                  <details className="pick-expand pick-expand--styled">
+                    <summary>
+                      <span className="pick-expand-label">展开 · 盈利与 PE 走势</span>
+                      <span className="pick-expand-icon" aria-hidden />
+                    </summary>
+                    <div className="pick-expand-body">
+                      <TrendSpark item={item} />
+                      <Link className="pick-detail-cta" to={`/stock/${encodeURIComponent(item.code)}`}>
+                        查看个股详情
+                        <span aria-hidden className="pick-detail-cta-arrow">
+                          →
+                        </span>
+                      </Link>
+                    </div>
+                  </details>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

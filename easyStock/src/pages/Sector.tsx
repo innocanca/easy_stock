@@ -20,6 +20,179 @@ function IconPeAscending({ className }: { className?: string }) {
   );
 }
 
+function sectorBenchPeScore(s: SectorBench) {
+  return Number.isFinite(s.avgPe) && s.avgPe > 0 ? s.avgPe : Number.POSITIVE_INFINITY;
+}
+
+/** 平方根刻度 + 最小柱高：压低极端高 PE 对纵轴的挤压，让左侧低 PE 柱子仍可辨认 */
+function peToBarHeight(pe: number, maxPe: number, innerH: number, minPx: number): number {
+  if (!(pe > 0) || !(maxPe > 0)) return minPx;
+  const sqrtH = Math.sqrt(pe / maxPe) * innerH;
+  return Math.min(innerH, Math.max(minPx, sqrtH));
+}
+
+function sectorChartLabelText(name: string, slotW: number): string {
+  const maxChars = slotW >= 52 ? 12 : slotW >= 44 ? 10 : slotW >= 36 ? 8 : 6;
+  if (name.length <= maxChars) return name;
+  return `${name.slice(0, Math.max(2, maxChars - 1))}…`;
+}
+
+/** 各板块平均市盈率柱状图：横轴为行业板块，按平均 PE 从低到高排列 */
+function SectorsAvgPeBarChart({
+  sectors,
+  activeId,
+}: {
+  sectors: SectorBench[];
+  activeId: string;
+}) {
+  /** bottom 留足斜排文字空间，避免裁切 */
+  const padding = { top: 12, right: 10, bottom: 62, left: 40 };
+  /** 略增高绘图区，低 PE 柱子更清晰 */
+  const innerH = 168;
+  const minBarPx = 18;
+  /**
+   * 固定柱间距：不因板块数量变多而把柱子压扁挤在一屏。
+   * 图会变宽，靠横向滚动浏览（单屏约可见 ~14～18 根，视窗口宽度而定）。
+   */
+  const slotW = 54;
+  const barW = 38;
+  const innerW = sectors.length * slotW;
+  const W = padding.left + innerW + padding.right;
+  const H = padding.top + innerH + padding.bottom;
+
+  const maxPe = useMemo(() => {
+    let m = 0;
+    for (const s of sectors) {
+      if (Number.isFinite(s.avgPe) && s.avgPe > 0) m = Math.max(m, s.avgPe);
+    }
+    return m > 0 ? m : 1;
+  }, [sectors]);
+
+  const meanPe = useMemo(() => {
+    const vals = sectors.map((s) => s.avgPe).filter((p) => Number.isFinite(p) && p > 0);
+    if (vals.length === 0) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }, [sectors]);
+
+  const meanY =
+    meanPe !== null && meanPe > 0
+      ? padding.top + innerH - Math.sqrt(meanPe / maxPe) * innerH
+      : null;
+
+  const baselineY = padding.top + innerH;
+  /** 轴下方标签旋转中心：略低于轴线，斜角略浅更易读 */
+  const labelPivotY = baselineY + 18;
+
+  return (
+    <div className="sector-pe-chart-wrap">
+      {sectors.length > 10 ? (
+        <p className="sector-pe-chart-density-hint">
+          共 {sectors.length} 个板块 · 横向滑动查看，避免一屏过挤
+        </p>
+      ) : null}
+      <div className="sector-pe-chart-scroll">
+        <svg
+          className="sector-pe-chart-svg"
+          width={W}
+          height={H}
+          viewBox={`0 0 ${W} ${H}`}
+          role="img"
+          aria-label="各板块平均市盈率柱状图，按平均市盈率从低到高排列"
+        >
+          <text
+            x={padding.left - 6}
+            y={padding.top + 10}
+            textAnchor="end"
+            className="sector-pe-chart-axis"
+          >
+            {maxPe.toFixed(1)}
+          </text>
+          <text
+            x={padding.left - 6}
+            y={padding.top + 22}
+            textAnchor="end"
+            className="sector-pe-chart-axis-note"
+          >
+            √刻度
+          </text>
+          <text
+            x={padding.left - 6}
+            y={baselineY}
+            textAnchor="end"
+            className="sector-pe-chart-axis"
+          >
+            0
+          </text>
+          <line
+            x1={padding.left}
+            y1={baselineY}
+            x2={padding.left + innerW}
+            y2={baselineY}
+            className="sector-pe-chart-baseline"
+          />
+          {meanY !== null ? (
+            <g>
+              <line
+                x1={padding.left}
+                y1={meanY}
+                x2={padding.left + innerW}
+                y2={meanY}
+                className="sector-pe-chart-refline"
+              />
+              <text
+                x={padding.left + innerW - 2}
+                y={meanY - 4}
+                textAnchor="end"
+                className="sector-pe-chart-reflabel"
+              >
+                板块均值（算术平均）{meanPe !== null ? meanPe.toFixed(1) : ""}
+              </text>
+            </g>
+          ) : null}
+          {sectors.map((s, i) => {
+            const cx = padding.left + i * slotW + slotW / 2;
+            const xBar = cx - barW / 2;
+            const valid = Number.isFinite(s.avgPe) && s.avgPe > 0;
+            const h = valid ? peToBarHeight(s.avgPe, maxPe, innerH, minBarPx) : 4;
+            const y = baselineY - h;
+            const rankClass =
+              i === 0 ? "sector-pe-chart-bar--r1" : i === 1 ? "sector-pe-chart-bar--r2" : i === 2 ? "sector-pe-chart-bar--r3" : "";
+            const activeClass = s.id === activeId ? " sector-pe-chart-bar--active" : "";
+
+            return (
+              <g key={s.id}>
+                <Link to={`/sector/${encodeURIComponent(s.id)}`}>
+                  <title>
+                    {s.name} · 平均 PE {valid ? s.avgPe : "—"}
+                  </title>
+                  <rect
+                    x={xBar}
+                    y={y}
+                    width={barW}
+                    height={Math.max(h, 2)}
+                    rx={3}
+                    className={`sector-pe-chart-bar ${rankClass}${!valid ? " sector-pe-chart-bar--na" : ""}${activeClass}`}
+                  />
+                </Link>
+                <text
+                  x={cx}
+                  y={labelPivotY}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  transform={`rotate(-38 ${cx} ${labelPivotY})`}
+                  className="sector-pe-chart-label"
+                >
+                  {sectorChartLabelText(s.name, slotW)}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 export function Sector() {
   const { id = "" } = useParams();
 
@@ -73,16 +246,15 @@ export function Sector() {
     return [...stocks].sort((a, b) => b.vsSectorPe - a.vsSectorPe);
   }, [stocks]);
 
-  /** PE 数值由低到高（无效或缺失 PE 排在末尾） */
-  const sortedByPeAsc = useMemo(() => {
-    const score = (r: SectorRow) =>
-      Number.isFinite(r.pe) && r.pe > 0 ? r.pe : Number.POSITIVE_INFINITY;
-    return [...stocks].sort((a, b) => {
-      const d = score(a) - score(b);
+  /** 板块列表按平均 PE 由低到高（无效 PE 的板块排在末尾） */
+  const sortedSectorsByPeAsc = useMemo(() => {
+    if (!sectors) return [];
+    return [...sectors].sort((a, b) => {
+      const d = sectorBenchPeScore(a) - sectorBenchPeScore(b);
       if (d !== 0) return d;
-      return a.code.localeCompare(b.code);
+      return a.id.localeCompare(b.id);
     });
-  }, [stocks]);
+  }, [sectors]);
 
   if (err && sectors === null) {
     return (
@@ -110,11 +282,22 @@ export function Sector() {
   return (
     <>
       <h1 className="page-title">板块</h1>
-      <p className="page-sub">均值基准 + 行业内个股相对偏离（数据来自 API）。</p>
+      <p className="page-sub">各行业平均 PE 对比；详情页展示行业内个股相对偏离（数据来自 API）。</p>
+
+      {sortedSectorsByPeAsc.length > 0 ? (
+        <div className="sector-pe-sort-block sector-board-pe-overview">
+          <p className="section-label sector-pe-sort-heading">
+            <IconPeAscending className="sector-pe-sort-icon" />
+            <span>板块平均 PE（由低到高）</span>
+            <span className="sector-pe-sort-hint">柱高为 √ 比例（悬停见 PE）；左低右高</span>
+          </p>
+          <SectorsAvgPeBarChart sectors={sortedSectorsByPeAsc} activeId={id} />
+        </div>
+      ) : null}
 
       <div className="sector-layout">
-        <nav className="sector-list" aria-label="板块切换">
-          {sectors.map((s) => (
+        <nav className="sector-list" aria-label="板块切换（按平均 PE 从低到高）">
+          {sortedSectorsByPeAsc.map((s) => (
             <Link key={s.id} to={`/sector/${s.id}`} className={s.id === id ? "active" : ""}>
               {s.name}
             </Link>
@@ -151,55 +334,6 @@ export function Sector() {
                   <div className="value">{sector.vsMarketPe}x</div>
                 </div>
               </div>
-
-              {sortedByPeAsc.length > 0 ? (
-                <div className="sector-pe-sort-block">
-                  <p className="section-label sector-pe-sort-heading">
-                    <IconPeAscending className="sector-pe-sort-icon" />
-                    <span>PE 由低到高</span>
-                    <span className="sector-pe-sort-hint">左侧估值更低 → 右侧更高</span>
-                  </p>
-                  <div className="sector-pe-strip-scroll">
-                    <ul className="sector-pe-strip" aria-label="行业内按市盈率从低到高">
-                      {sortedByPeAsc.map((r, i) => (
-                        <li key={r.code} className="sector-pe-strip-item">
-                          <Link
-                            className={`sector-pe-chip${i < 3 ? ` sector-pe-chip--rank-${i + 1}` : ""}`}
-                            to={`/stock/${encodeURIComponent(r.code)}`}
-                            title={`${r.name} · PE ${Number.isFinite(r.pe) && r.pe > 0 ? r.pe : "—"}`}
-                          >
-                            <span className="sector-pe-chip-rank" aria-hidden>
-                              {i + 1}
-                            </span>
-                            <span className="sector-pe-chip-text">
-                              <span className="sector-pe-chip-name">{r.name}</span>
-                              <span className="sector-pe-chip-pe">
-                                PE{" "}
-                                <strong>
-                                  {Number.isFinite(r.pe) && r.pe > 0 ? r.pe : "—"}
-                                </strong>
-                              </span>
-                            </span>
-                          </Link>
-                          {i < sortedByPeAsc.length - 1 ? (
-                            <span className="sector-pe-strip-arrow" aria-hidden>
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                                <path
-                                  d="M9 6l6 6-6 6"
-                                  stroke="currentColor"
-                                  strokeWidth="2.2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            </span>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              ) : null}
 
               <p className="section-label">个股 vs 板块（按相对 PE 偏离排序）</p>
               <div className="panel table-only" style={{ marginBottom: "1.25rem" }}>
