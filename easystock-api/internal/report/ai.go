@@ -261,6 +261,8 @@ func (c *AIClient) ExtractFinancials(pdfText string, stockCode, stockName string
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
 
+	content = extractJSONObject(content)
+
 	var data ReportData
 	if err := json.Unmarshal([]byte(content), &data); err != nil {
 		return nil, fmt.Errorf("parse JSON: %w\nraw: %s", err, truncBody([]byte(content)))
@@ -299,6 +301,43 @@ func (c *AIClient) MultiYearAnalysis(reports []ReportData) (string, error) {
 	default:
 		return "", fmt.Errorf("no AI provider configured")
 	}
+}
+
+func extractJSONObject(s string) string {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return s
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if c == '\\' && inStr {
+			esc = true
+			continue
+		}
+		if c == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return s[start:]
 }
 
 func truncBody(b []byte) string {
