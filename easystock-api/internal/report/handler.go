@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 type Handler struct {
@@ -193,47 +192,83 @@ func (h *Handler) HandleUploadStream(w http.ResponseWriter, r *http.Request) {
 		log.Printf("report: extracted %d chars from PDF", len(pdfText))
 	}
 
-	streamBody := ClampReportText(pdfText, MaxRunesForAI)
-	sseQuoted(w, "status", fmt.Sprintf("已提取文本，送入模型约 %d 字（已截断超长部分），正在流式生成核心摘要…", utf8.RuneCountInString(streamBody)))
-
-	// Step 1: Stream core summary (Markdown) — primary path; avoids blocking on strict JSON.
 	existingWiki, _ := h.Store.MergeWikisExceptYear(stockCode, year)
 	hasContext := existingWiki != ""
-	systemPrompt := h.AI.SummaryStreamSystemPrompt(hasContext)
-	userMsg := h.AI.WikiUserMsg(streamBody, stockName, stockCode, year, existingWiki)
 
-	sseQuoted(w, "status", "正在流式输出核心摘要…")
-	wikiCh := make(chan string, 64)
-	var wikiErr error
-	go func() {
-		wikiErr = h.AI.CallStream(systemPrompt, userMsg, wikiCh)
-	}()
+	chunks := SplitIntoChunks(pdfText, MaxRunesPerChunk, ChunkOverlapRunes)
+	totalRunes := RuneCount(pdfText)
 
-	var wikiBuilder strings.Builder
-	for chunk := range wikiCh {
-		wikiBuilder.WriteString(chunk)
-		sseQuoted(w, "wiki_chunk", chunk)
-	}
-
-	if wikiErr != nil {
-		log.Printf("report: stream summary failed: %v", wikiErr)
-		sseQuoted(w, "error", "核心摘要生成失败: "+wikiErr.Error())
+	if len(chunks) == 1 {
+		sseQuoted(w, "status", fmt.Sprintf("已提取约 %d 字，正在流式生成完整分析…", totalRunes))
+		wikiContent := h.streamSinglePass(w, chunks[0], stockName, stockCode, year, existingWiki, hasContext)
+		if wikiContent == "" {
+			return
+		}
+		h.saveCninfoWiki(w, stockCode, year, wikiContent)
 		return
 	}
 
-	wikiContent := wikiBuilder.String()
-	wikiContent = strings.TrimPrefix(strings.TrimSpace(wikiContent), "```markdown")
-	wikiContent = strings.TrimPrefix(wikiContent, "```")
-	wikiContent = strings.TrimSuffix(strings.TrimSpace(wikiContent), "```")
-	wikiContent = strings.TrimSpace(wikiContent)
+	sseQuoted(w, "status", fmt.Sprintf("年报共约 %d 字，将分 %d 段逐段深度分析…", totalRunes, len(chunks)))
+	chunkResults := make([]string, 0, len(chunks))
+	for i, chunk := range chunks {
+		sseQuoted(w, "status", fmt.Sprintf("正在分析第 %d/%d 段（约 %d 字）…", i+1, len(chunks), RuneCount(chunk)))
+		sseQuoted(w, "wiki_chunk", fmt.Sprintf("\n\n---\n\n## 📖 第 %d/%d 段分析\n\n", i+1, len(chunks)))
 
-	if err := h.Store.SaveWiki(stockCode, year, wikiContent); err != nil {
-		log.Printf("report: save wiki failed: %v", err)
+		sp := fmt.Sprintf(chunkAnalysisPrompt, i+1, len(chunks))
+		um := fmt.Sprintf("## %s（%s）%d年年度报告 — 第%d段\n\n%s", stockName, stockCode, year, i+1, chunk)
+
+		ch := make(chan string, 64)
+		var streamErr error
+		go func() { streamErr = h.AI.CallStream(sp, um, ch) }()
+		var buf strings.Builder
+		for token := range ch {
+			buf.WriteString(token)
+			sseQuoted(w, "wiki_chunk", token)
+		}
+		if streamErr != nil {
+			sseQuoted(w, "status", fmt.Sprintf("第 %d 段分析出错，继续…", i+1))
+			continue
+		}
+		chunkResults = append(chunkResults, buf.String())
 	}
-	log.Printf("report: stream summary saved for %s %d (%d chars)", stockCode, year, len(wikiContent))
-	sseQuoted(w, "status", "核心摘要已保存至知识库")
-	log.Printf("report: upload stream finished for %s %d", stockCode, year)
-	sseQuoted(w, "done", "ok")
+
+	if len(chunkResults) == 0 {
+		sseQuoted(w, "error", "所有分段分析均失败")
+		return
+	}
+
+	sseQuoted(w, "status", "分段分析完成，正在综合生成最终报告…")
+	sseQuoted(w, "wiki_chunk", "\n\n---\n\n# 📊 综合分析报告\n\n")
+
+	var synthUser strings.Builder
+	if hasContext {
+		synthUser.WriteString("## 已有知识库\n\n")
+		synthUser.WriteString(existingWiki)
+		synthUser.WriteString("\n\n---\n\n")
+	}
+	synthUser.WriteString(fmt.Sprintf("## %s（%s）%d年年度报告 — 各段分析汇总\n\n", stockName, stockCode, year))
+	for i, cr := range chunkResults {
+		synthUser.WriteString(fmt.Sprintf("### 第 %d 段分析\n\n%s\n\n", i+1, cr))
+	}
+
+	synthPrompt := chunkSynthesisPrompt
+	if hasContext {
+		synthPrompt = chunkSynthesisWithContextPrompt
+	}
+
+	synthCh := make(chan string, 64)
+	var synthErr error
+	go func() { synthErr = h.AI.CallStream(synthPrompt, synthUser.String(), synthCh) }()
+	var finalBuf strings.Builder
+	for token := range synthCh {
+		finalBuf.WriteString(token)
+		sseQuoted(w, "wiki_chunk", token)
+	}
+	if synthErr != nil {
+		sseQuoted(w, "error", "综合报告生成失败: "+synthErr.Error())
+		return
+	}
+	h.saveCninfoWiki(w, stockCode, year, finalBuf.String())
 }
 
 // ---- List / Analysis / Delete ----
@@ -384,6 +419,221 @@ func (h *Handler) HandleWikiMeta(w http.ResponseWriter, r *http.Request) {
 		"stock_name": stockName,
 		"years":      years,
 	})
+}
+
+// ---- Cninfo (巨潮资讯网) ----
+
+func (h *Handler) HandleCninfoNews(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if code == "" {
+		writeErr(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	items, err := SearchCninfoNews(code, name, 30)
+	if err != nil {
+		log.Printf("cninfo news %s: %v", code, err)
+		writeErr(w, http.StatusBadGateway, "巨潮资讯查询失败: "+err.Error())
+		return
+	}
+	writeJSON(w, items)
+}
+
+func (h *Handler) HandleCninfoSearch(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if code == "" {
+		writeErr(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	reports, err := SearchCninfoReports(code, name)
+	if err != nil {
+		log.Printf("cninfo search %s: %v", code, err)
+		writeErr(w, http.StatusBadGateway, "巨潮查询失败: "+err.Error())
+		return
+	}
+	writeJSON(w, reports)
+}
+
+// HandleCninfoAnalyze downloads a report from cninfo and streams AI analysis via SSE.
+// For long reports it splits text into chunks, analyzes each, then synthesizes.
+func (h *Handler) HandleCninfoAnalyze(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if !h.AI.Ready() {
+		sseQuoted(w, "error", "AI provider is not configured")
+		return
+	}
+
+	var req struct {
+		StockCode   string `json:"stock_code"`
+		StockName   string `json:"stock_name"`
+		Year        int    `json:"year"`
+		DownloadURL string `json:"download_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sseQuoted(w, "error", "invalid JSON: "+err.Error())
+		return
+	}
+	if req.StockCode == "" || req.Year == 0 || req.DownloadURL == "" {
+		sseQuoted(w, "error", "stock_code, year, download_url are required")
+		return
+	}
+	if req.StockName == "" {
+		req.StockName = req.StockCode
+	}
+
+	if err := h.Store.EnsureDirs(req.StockCode); err != nil {
+		sseQuoted(w, "error", "create dirs: "+err.Error())
+		return
+	}
+
+	sseQuoted(w, "status", fmt.Sprintf("正在从巨潮资讯网下载 %d 年度报告…", req.Year))
+	pdfPath := h.Store.PDFPath(req.StockCode, req.Year)
+	if err := DownloadCninfoPDF(req.DownloadURL, pdfPath); err != nil {
+		log.Printf("cninfo download %s %d: %v", req.StockCode, req.Year, err)
+		sseQuoted(w, "error", "年报下载失败: "+err.Error())
+		return
+	}
+	sseQuoted(w, "status", "下载完成，正在提取PDF文本…")
+
+	pdfText, err := ExtractPDFText(pdfPath)
+	if err != nil {
+		log.Printf("cninfo: PDF text extraction failed: %v", err)
+		pdfText = fmt.Sprintf("PDF文本提取失败。请基于你的知识分析 %s（%s）%d年年度报告。", req.StockName, req.StockCode, req.Year)
+	} else if len(strings.TrimSpace(pdfText)) < 200 {
+		pdfText = fmt.Sprintf("PDF提取的文本较少：\n%s\n\n请基于你的知识补充分析 %s（%s）%d年年度报告。",
+			pdfText, req.StockName, req.StockCode, req.Year)
+	} else {
+		log.Printf("cninfo: extracted %d chars (%d runes) from PDF", len(pdfText), RuneCount(pdfText))
+	}
+
+	existingWiki, _ := h.Store.MergeWikisExceptYear(req.StockCode, req.Year)
+	hasContext := existingWiki != ""
+
+	chunks := SplitIntoChunks(pdfText, MaxRunesPerChunk, ChunkOverlapRunes)
+	totalRunes := RuneCount(pdfText)
+
+	if len(chunks) == 1 {
+		// Single-pass: text fits in one call
+		sseQuoted(w, "status", fmt.Sprintf("已提取约 %d 字，正在流式生成完整分析…", totalRunes))
+		wikiContent := h.streamSinglePass(w, chunks[0], req.StockName, req.StockCode, req.Year, existingWiki, hasContext)
+		if wikiContent == "" {
+			return
+		}
+		h.saveCninfoWiki(w, req.StockCode, req.Year, wikiContent)
+		return
+	}
+
+	// Multi-pass: chunked analysis then synthesis
+	sseQuoted(w, "status", fmt.Sprintf("年报共约 %d 字，将分 %d 段逐段深度分析…", totalRunes, len(chunks)))
+
+	chunkResults := make([]string, 0, len(chunks))
+	for i, chunk := range chunks {
+		sseQuoted(w, "status", fmt.Sprintf("正在分析第 %d/%d 段（约 %d 字）…", i+1, len(chunks), RuneCount(chunk)))
+		sseQuoted(w, "wiki_chunk", fmt.Sprintf("\n\n---\n\n## 📖 第 %d/%d 段分析\n\n", i+1, len(chunks)))
+
+		systemPrompt := fmt.Sprintf(chunkAnalysisPrompt, i+1, len(chunks))
+		userMsg := fmt.Sprintf("## %s（%s）%d年年度报告 — 第%d段\n\n%s", req.StockName, req.StockCode, req.Year, i+1, chunk)
+
+		ch := make(chan string, 64)
+		var streamErr error
+		go func() { streamErr = h.AI.CallStream(systemPrompt, userMsg, ch) }()
+
+		var buf strings.Builder
+		for token := range ch {
+			buf.WriteString(token)
+			sseQuoted(w, "wiki_chunk", token)
+		}
+		if streamErr != nil {
+			log.Printf("cninfo: chunk %d/%d failed: %v", i+1, len(chunks), streamErr)
+			sseQuoted(w, "status", fmt.Sprintf("第 %d 段分析出错，继续下一段…", i+1))
+			continue
+		}
+		chunkResults = append(chunkResults, buf.String())
+	}
+
+	if len(chunkResults) == 0 {
+		sseQuoted(w, "error", "所有分段分析均失败")
+		return
+	}
+
+	// Synthesis pass
+	sseQuoted(w, "status", "所有分段分析完成，正在综合生成最终报告…")
+	sseQuoted(w, "wiki_chunk", "\n\n---\n\n# 📊 综合分析报告\n\n")
+
+	var synthUser strings.Builder
+	if hasContext {
+		synthUser.WriteString("## 已有知识库\n\n")
+		synthUser.WriteString(existingWiki)
+		synthUser.WriteString("\n\n---\n\n")
+	}
+	synthUser.WriteString(fmt.Sprintf("## %s（%s）%d年年度报告 — 各段分析汇总\n\n", req.StockName, req.StockCode, req.Year))
+	for i, cr := range chunkResults {
+		synthUser.WriteString(fmt.Sprintf("### 第 %d 段分析\n\n%s\n\n", i+1, cr))
+	}
+
+	synthPrompt := chunkSynthesisPrompt
+	if hasContext {
+		synthPrompt = chunkSynthesisWithContextPrompt
+	}
+
+	synthCh := make(chan string, 64)
+	var synthErr error
+	go func() { synthErr = h.AI.CallStream(synthPrompt, synthUser.String(), synthCh) }()
+
+	var finalBuf strings.Builder
+	for token := range synthCh {
+		finalBuf.WriteString(token)
+		sseQuoted(w, "wiki_chunk", token)
+	}
+
+	if synthErr != nil {
+		log.Printf("cninfo: synthesis failed: %v", synthErr)
+		sseQuoted(w, "error", "综合报告生成失败: "+synthErr.Error())
+		return
+	}
+
+	h.saveCninfoWiki(w, req.StockCode, req.Year, finalBuf.String())
+}
+
+func (h *Handler) streamSinglePass(w http.ResponseWriter, text, stockName, stockCode string, year int, existingWiki string, hasContext bool) string {
+	systemPrompt := h.AI.SummaryStreamSystemPrompt(hasContext)
+	userMsg := h.AI.WikiUserMsg(text, stockName, stockCode, year, existingWiki)
+
+	ch := make(chan string, 64)
+	var streamErr error
+	go func() { streamErr = h.AI.CallStream(systemPrompt, userMsg, ch) }()
+
+	var buf strings.Builder
+	for token := range ch {
+		buf.WriteString(token)
+		sseQuoted(w, "wiki_chunk", token)
+	}
+
+	if streamErr != nil {
+		log.Printf("cninfo: single-pass failed: %v", streamErr)
+		sseQuoted(w, "error", "分析生成失败: "+streamErr.Error())
+		return ""
+	}
+	return buf.String()
+}
+
+func (h *Handler) saveCninfoWiki(w http.ResponseWriter, stockCode string, year int, raw string) {
+	content := strings.TrimPrefix(strings.TrimSpace(raw), "```markdown")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(strings.TrimSpace(content), "```")
+	content = strings.TrimSpace(content)
+
+	if err := h.Store.SaveWiki(stockCode, year, content); err != nil {
+		log.Printf("cninfo: save wiki failed: %v", err)
+	}
+	log.Printf("cninfo: analysis saved for %s %d (%d chars)", stockCode, year, len(content))
+	sseQuoted(w, "status", "分析已保存至知识库")
+	sseQuoted(w, "done", "ok")
 }
 
 // ---- Utilities ----

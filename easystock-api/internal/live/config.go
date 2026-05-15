@@ -38,7 +38,7 @@ func DefaultMinMvWan() float64 {
 }
 
 func PicksCacheTTL() time.Duration {
-	const def = 5 * time.Minute
+	const def = 60 * time.Minute
 	s := strings.TrimSpace(os.Getenv("TUSHARE_PICKS_CACHE_MINUTES"))
 	if s == "" {
 		return def
@@ -102,7 +102,7 @@ func TradeDate() string {
 
 // PicksConcurrency limits parallel Tushare calls while building /api/picks (reduces gateway 504s).
 func PicksConcurrency() int {
-	const def = 4
+	const def = 8
 	s := strings.TrimSpace(os.Getenv("TUSHARE_PICKS_CONCURRENCY"))
 	if s == "" {
 		return def

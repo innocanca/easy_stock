@@ -14,13 +14,15 @@ import (
 	"easystock/api/internal/tushare"
 )
 
-type pickItem struct {
+type PickItem struct {
 	Code            string         `json:"code"`
 	Name            string         `json:"name"`
+	Sector          string         `json:"sector"`
 	Score           int            `json:"score"`
 	Pe              float64        `json:"pe"`
 	Roe             float64        `json:"roe"`
 	ProfitGrowthYoy float64        `json:"profitGrowthYoy"`
+	TurnoverRate    float64        `json:"turnoverRate"`
 	Dimensions      map[string]int `json:"dimensions"`
 	ScoreNote       string         `json:"scoreNote"`
 	ProfitTrend     []profitTrend  `json:"profitTrend"`
@@ -55,23 +57,107 @@ type finaSnap struct {
 }
 
 type picksResponse struct {
-	Items    []pickItem `json:"items"`
+	Items    []PickItem `json:"items"`
 	Total    int        `json:"total"`
 	Page     int        `json:"page"`
 	PageSize int        `json:"pageSize"`
+}
+
+// PickStyle defines scoring weights for a specific investment style.
+type PickStyle struct {
+	ID         string  `json:"id"`
+	Label      string  `json:"label"`
+	Desc       string  `json:"desc"`
+	WeightVal  float64 `json:"-"`
+	WeightValu float64 `json:"-"`
+	WeightCert float64 `json:"-"`
+	WeightGrow float64 `json:"-"`
+}
+
+var pickStyleOrder = []string{"balanced", "value", "bluechip", "growth", "dividend"}
+
+var pickStyles = map[string]PickStyle{
+	"balanced": {ID: "balanced", Label: "综合均衡", Desc: "价值、估值、确定性、成长四维均衡", WeightVal: 0.28, WeightValu: 0.28, WeightCert: 0.22, WeightGrow: 0.22},
+	"value":    {ID: "value", Label: "价值投资", Desc: "偏爱高 ROE、高毛利、低负债的优质企业", WeightVal: 0.40, WeightValu: 0.30, WeightCert: 0.20, WeightGrow: 0.10},
+	"bluechip": {ID: "bluechip", Label: "低估蓝筹", Desc: "偏爱低 PE、大市值的低估值蓝筹股", WeightVal: 0.15, WeightValu: 0.50, WeightCert: 0.25, WeightGrow: 0.10},
+	"growth":   {ID: "growth", Label: "高成长", Desc: "偏爱净利润和营收高速增长的成长股", WeightVal: 0.10, WeightValu: 0.15, WeightCert: 0.15, WeightGrow: 0.60},
+	"dividend": {ID: "dividend", Label: "稳健红利", Desc: "偏爱低波动、高 ROE 的稳健分红股", WeightVal: 0.20, WeightValu: 0.20, WeightCert: 0.50, WeightGrow: 0.10},
+}
+
+// ListPickStyles returns available styles in display order.
+func ListPickStyles() []PickStyle {
+	out := make([]PickStyle, 0, len(pickStyleOrder))
+	for _, id := range pickStyleOrder {
+		out = append(out, pickStyles[id])
+	}
+	return out
+}
+
+func getStyle(id string) PickStyle {
+	if s, ok := pickStyles[id]; ok {
+		return s
+	}
+	return pickStyles["balanced"]
 }
 
 type picksFullCache struct {
 	at    time.Time
 	date  string
 	minMv float64
-	items []pickItem
+	items []PickItem
 }
 
 var (
-	picksMu         sync.Mutex
-	picksFullCached *picksFullCache
+	picksMu        sync.Mutex
+	picksCacheMap  = make(map[string]*picksFullCache) // key: styleID
 )
+
+// Per-stock financial data caches (24h TTL)
+type finaSnapCacheEntry struct {
+	data finaSnap
+	at   time.Time
+}
+type profitsCacheEntry struct {
+	data []qProfit
+	err  error
+	at   time.Time
+}
+
+var (
+	finaSnapCache   = make(map[string]finaSnapCacheEntry)
+	finaSnapMu      sync.RWMutex
+	profitsCache    = make(map[string]profitsCacheEntry)
+	profitsMu       sync.RWMutex
+	finaCacheTTL    = 24 * time.Hour
+)
+
+// WarmUpPicks pre-builds the picks cache in a background goroutine so the
+// first user request doesn't have to wait.
+func WarmUpPicks(c *tushare.Client) {
+	go func() {
+		minMv := DefaultMinMvWan()
+		_, err := getCachedFullPicks(c, minMv, "balanced")
+		if err != nil {
+			fmt.Printf("picks warm-up failed: %v\n", err)
+		} else {
+			fmt.Println("picks warm-up: cache ready (balanced)")
+		}
+	}()
+}
+
+// TopPicksForAI returns top N picks for AI recommendation (used by the AI stock picker).
+func TopPicksForAI(c *tushare.Client, styleID string, topN int) ([]PickItem, PickStyle, error) {
+	style := getStyle(styleID)
+	minMv := DefaultMinMvWan()
+	items, err := getCachedFullPicks(c, minMv, styleID)
+	if err != nil {
+		return nil, style, err
+	}
+	if topN > len(items) {
+		topN = len(items)
+	}
+	return items[:topN], style, nil
+}
 
 // PicksJSON returns /api/picks JSON: 市值≥min_mv_wan（默认500亿）的全部标的，按综合分排序；支持 score 区间与分页。
 // 查询参数：page, page_size, min_mv_wan, score_min, score_max（均为可选）。
@@ -103,7 +189,12 @@ func PicksJSON(c *tushare.Client, q url.Values) ([]byte, error) {
 		scoreMin, scoreMax = scoreMax, scoreMin
 	}
 
-	full, err := getCachedFullPicks(c, minMv)
+	styleID := q.Get("style")
+	if styleID == "" {
+		styleID = "balanced"
+	}
+
+	full, err := getCachedFullPicks(c, minMv, styleID)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +226,8 @@ func PicksJSON(c *tushare.Client, q url.Values) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func getCachedFullPicks(c *tushare.Client, minMv float64) ([]pickItem, error) {
+func getCachedFullPicks(c *tushare.Client, minMv float64, styleID string) ([]PickItem, error) {
+	style := getStyle(styleID)
 	picksMu.Lock()
 	defer picksMu.Unlock()
 	date, err := LatestTradeDate(c)
@@ -143,19 +235,19 @@ func getCachedFullPicks(c *tushare.Client, minMv float64) ([]pickItem, error) {
 		return nil, err
 	}
 	ttl := PicksCacheTTL()
-	if picksFullCached != nil && time.Since(picksFullCached.at) < ttl &&
-		picksFullCached.date == date && picksFullCached.minMv == minMv {
-		return picksFullCached.items, nil
+	if cached := picksCacheMap[style.ID]; cached != nil &&
+		time.Since(cached.at) < ttl && cached.date == date && cached.minMv == minMv {
+		return cached.items, nil
 	}
-	items, err := buildPicksFull(c, minMv)
+	items, err := buildPicksFull(c, minMv, style)
 	if err != nil {
 		return nil, err
 	}
-	picksFullCached = &picksFullCache{at: time.Now(), date: date, minMv: minMv, items: items}
+	picksCacheMap[style.ID] = &picksFullCache{at: time.Now(), date: date, minMv: minMv, items: items}
 	return items, nil
 }
 
-func buildPicksFull(c *tushare.Client, minMvWan float64) ([]pickItem, error) {
+func buildPicksFull(c *tushare.Client, minMvWan float64, style PickStyle) ([]PickItem, error) {
 	date, err := LatestTradeDate(c)
 	if err != nil {
 		return nil, err
@@ -193,7 +285,7 @@ func buildPicksFull(c *tushare.Client, minMvWan float64) ([]pickItem, error) {
 	}
 	list = filtered
 
-	out := make([]pickItem, len(list))
+	out := make([]PickItem, len(list))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, PicksConcurrency())
 	for i := range list {
@@ -202,13 +294,17 @@ func buildPicksFull(c *tushare.Client, minMvWan float64) ([]pickItem, error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[idx] = buildOnePick(c, names, date, medianPe, list[idx])
+			out[idx] = buildOnePick(c, names, date, medianPe, list[idx], style)
 		}(i)
 	}
 	wg.Wait()
 
+	// Rank-normalize: convert raw dimension scores to within-pool percentile
+	// ranks so that weight changes across styles produce meaningful re-ordering.
+	rankComposite(out, style)
+
 	type scored struct {
-		item pickItem
+		item PickItem
 		mv   float64
 	}
 	paired := make([]scored, len(list))
@@ -225,11 +321,49 @@ func buildPicksFull(c *tushare.Client, minMvWan float64) ([]pickItem, error) {
 		}
 		return paired[i].item.Code < paired[j].item.Code
 	})
-	result := make([]pickItem, len(paired))
+	result := make([]PickItem, len(paired))
 	for i := range paired {
 		result[i] = paired[i].item
 	}
 	return result, nil
+}
+
+// rankComposite re-computes Score using within-pool percentile ranks for each
+// dimension, so different style weights create meaningful ordering differences.
+// Raw dimension scores in Dimensions map are preserved for UI display.
+func rankComposite(items []PickItem, style PickStyle) {
+	n := len(items)
+	if n < 2 {
+		return
+	}
+
+	dims := []string{"value", "valuation", "certainty", "growth"}
+	weights := []float64{style.WeightVal, style.WeightValu, style.WeightCert, style.WeightGrow}
+
+	// For each dimension, compute percentile rank (0–100) within the pool.
+	pctRanks := make([][]float64, 4)
+	for di, dim := range dims {
+		indices := make([]int, n)
+		for i := range indices {
+			indices[i] = i
+		}
+		sort.Slice(indices, func(a, b int) bool {
+			return items[indices[a]].Dimensions[dim] < items[indices[b]].Dimensions[dim]
+		})
+		pctRanks[di] = make([]float64, n)
+		for rank, idx := range indices {
+			pctRanks[di][idx] = float64(rank) / float64(n-1) * 100
+		}
+	}
+
+	// Composite score = weighted sum of percentile ranks
+	for i := range items {
+		raw := 0.0
+		for di := range dims {
+			raw += weights[di] * pctRanks[di][i]
+		}
+		items[i].Score = int(math.Round(raw))
+	}
 }
 
 func parseIntDefault(s string, def int) int {
@@ -256,11 +390,16 @@ func parseFloatDefault(s string, def float64) float64 {
 	return n
 }
 
-func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate string, medianPe float64, r rowSort) pickItem {
+func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate string, medianPe float64, r rowSort, style PickStyle) PickItem {
 	code := tushare.GetString(r.m, "ts_code")
 	name := stockName(names, code)
+	sector := ""
+	if sb, ok := names[code]; ok {
+		sector = sb.Industry
+	}
 	pe := r.pe
 	mv := tushare.GetFloat(r.m, "total_mv")
+	turnoverRate := tushare.GetFloat(r.m, "turnover_rate_f")
 
 	fi := fetchFinaSnap(c, code)
 	profitPts, incErr := fetchQuarterlyProfitsYi(c, code)
@@ -271,13 +410,13 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 	grow := dimGrowth(fi)
 
 	dims := map[string]int{
-		"value":       val,
-		"valuation":   valu,
-		"certainty":   cert,
-		"growth":      grow,
+		"value":     val,
+		"valuation": valu,
+		"certainty": cert,
+		"growth":    grow,
 	}
 
-	raw := 0.28*float64(val) + 0.28*float64(valu) + 0.22*float64(cert) + 0.22*float64(grow)
+	raw := style.WeightVal*float64(val) + style.WeightValu*float64(valu) + style.WeightCert*float64(cert) + style.WeightGrow*float64(grow)
 	score := int(math.Round(raw))
 	if score < 1 {
 		score = 1
@@ -315,13 +454,15 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 		note += " 利润为合并报表归属净利（亿元，最近至多四季）；PE 走势按当期 PE 与历史季度利润比例回溯近似。"
 	}
 
-	return pickItem{
+	return PickItem{
 		Code:            code,
 		Name:            name,
+		Sector:          sector,
 		Score:           score,
 		Pe:              math.Round(pe*10) / 10,
 		Roe:             roe,
 		ProfitGrowthYoy: pgy,
+		TurnoverRate:    math.Round(turnoverRate*100) / 100,
 		Dimensions:      dims,
 		ScoreNote:       note,
 		ProfitTrend:     pt,
@@ -330,6 +471,13 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 }
 
 func fetchFinaSnap(c *tushare.Client, tsCode string) finaSnap {
+	finaSnapMu.RLock()
+	if e, ok := finaSnapCache[tsCode]; ok && time.Since(e.at) < finaCacheTTL {
+		finaSnapMu.RUnlock()
+		return e.data
+	}
+	finaSnapMu.RUnlock()
+
 	resp, err := c.Call("fina_indicator", map[string]any{
 		"ts_code": tsCode,
 	}, "ts_code,end_date,roe,grossprofit_margin,debt_to_assets,netprofit_margin,netprofit_yoy,tr_yoy")
@@ -344,7 +492,7 @@ func fetchFinaSnap(c *tushare.Client, tsCode string) finaSnap {
 		return tushare.GetString(fiRows[i], "end_date") > tushare.GetString(fiRows[j], "end_date")
 	})
 	row := fiRows[0]
-	return finaSnap{
+	snap := finaSnap{
 		endDate:      tushare.GetString(row, "end_date"),
 		roe:          tushare.GetFloat(row, "roe"),
 		grossMargin:  tushare.GetFloat(row, "grossprofit_margin"),
@@ -354,6 +502,11 @@ func fetchFinaSnap(c *tushare.Client, tsCode string) finaSnap {
 		trYoy:        tushare.GetFloat(row, "tr_yoy"),
 		ok:           true,
 	}
+
+	finaSnapMu.Lock()
+	finaSnapCache[tsCode] = finaSnapCacheEntry{data: snap, at: time.Now()}
+	finaSnapMu.Unlock()
+	return snap
 }
 
 type qProfit struct {
@@ -362,6 +515,13 @@ type qProfit struct {
 }
 
 func fetchQuarterlyProfitsYi(c *tushare.Client, tsCode string) ([]qProfit, error) {
+	profitsMu.RLock()
+	if e, ok := profitsCache[tsCode]; ok && time.Since(e.at) < finaCacheTTL {
+		profitsMu.RUnlock()
+		return e.data, e.err
+	}
+	profitsMu.RUnlock()
+
 	resp, err := c.Call("income", map[string]any{
 		"ts_code": tsCode,
 	}, "end_date,n_income_attr_p")
@@ -386,7 +546,6 @@ func fetchQuarterlyProfitsYi(c *tushare.Client, tsCode string) ([]qProfit, error
 			continue
 		}
 		seen[ed] = struct{}{}
-		// n_income_attr_p：万元 → 亿元
 		wan := tushare.GetFloat(row, "n_income_attr_p")
 		out = append(out, qProfit{endDate: ed, yi: wan / 10000.0})
 		if len(out) >= 4 {
@@ -394,12 +553,19 @@ func fetchQuarterlyProfitsYi(c *tushare.Client, tsCode string) ([]qProfit, error
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("无有效季度净利")
+		retErr := fmt.Errorf("无有效季度净利")
+		profitsMu.Lock()
+		profitsCache[tsCode] = profitsCacheEntry{err: retErr, at: time.Now()}
+		profitsMu.Unlock()
+		return nil, retErr
 	}
-	// 转为时间正序（旧 → 新），便于展示走势
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].endDate < out[j].endDate
 	})
+
+	profitsMu.Lock()
+	profitsCache[tsCode] = profitsCacheEntry{data: out, at: time.Now()}
+	profitsMu.Unlock()
 	return out, nil
 }
 

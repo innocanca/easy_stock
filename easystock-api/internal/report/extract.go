@@ -2,19 +2,19 @@ package report
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ledongthuc/pdf"
 )
 
-const maxTextLen = 80000
+const maxExtractBytes = 600000
 
-// MaxRunesForAI caps how much report text is sent to the model to reduce
-// context overflows and timeouts while keeping the head of the document
-// (where key metrics usually appear).
-const MaxRunesForAI = 52000
+// MaxRunesPerChunk is the max runes sent per AI call in chunked mode.
+const MaxRunesPerChunk = 60000
 
-// MaxRunesForJSONExtract is slightly smaller to leave room for system prompt
-// and the model's JSON response.
+// ChunkOverlapRunes gives context continuity between chunks.
+const ChunkOverlapRunes = 2000
+
 const MaxRunesForJSONExtract = 38000
 
 func ClampReportText(s string, maxRunes int) string {
@@ -24,6 +24,34 @@ func ClampReportText(s string, maxRunes int) string {
 		return s
 	}
 	return strings.TrimSpace(string(r[:maxRunes]) + "\n\n（后文已省略，分析仅依据以上片段。）")
+}
+
+// SplitIntoChunks splits long text into overlapping chunks for multi-pass analysis.
+// If the text fits in one chunk it returns a single-element slice.
+func SplitIntoChunks(text string, chunkRunes, overlapRunes int) []string {
+	runes := []rune(strings.TrimSpace(text))
+	total := len(runes)
+	if total <= chunkRunes {
+		return []string{string(runes)}
+	}
+
+	var chunks []string
+	start := 0
+	for start < total {
+		end := start + chunkRunes
+		if end > total {
+			end = total
+		}
+		chunks = append(chunks, string(runes[start:end]))
+		if end >= total {
+			break
+		}
+		start = end - overlapRunes
+		if start < 0 {
+			start = 0
+		}
+	}
+	return chunks
 }
 
 func ExtractPDFText(filepath string) (string, error) {
@@ -46,13 +74,17 @@ func ExtractPDFText(filepath string) (string, error) {
 		}
 		buf.WriteString(text)
 		buf.WriteString("\n")
-		if buf.Len() > maxTextLen {
+		if buf.Len() > maxExtractBytes {
 			break
 		}
 	}
 	result := buf.String()
-	if len(result) > maxTextLen {
-		result = result[:maxTextLen]
+	if len(result) > maxExtractBytes {
+		result = result[:maxExtractBytes]
 	}
 	return result, nil
+}
+
+func RuneCount(s string) int {
+	return utf8.RuneCountInString(s)
 }

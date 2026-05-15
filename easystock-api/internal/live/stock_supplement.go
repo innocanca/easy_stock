@@ -158,3 +158,73 @@ func stockFlowsTab(c *tushare.Client, tsCode string, tradeDate string) []map[str
 	}
 	return out
 }
+
+// stockBusinessSegments fetches main business composition via fina_mainbz (by product).
+func stockBusinessSegments(c *tushare.Client, tsCode string) []map[string]any {
+	resp, err := c.Call("fina_mainbz", map[string]any{
+		"ts_code": tsCode,
+		"type":    "P",
+	}, "ts_code,end_date,bz_item,bz_sales,bz_profit,bz_cost")
+	if err != nil {
+		return nil
+	}
+	rows, err := tushare.RowsToMaps(resp)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		return tushare.GetString(rows[i], "end_date") > tushare.GetString(rows[j], "end_date")
+	})
+	latestPeriod := tushare.GetString(rows[0], "end_date")
+
+	type bizItem struct {
+		Name   string
+		Sales  float64
+		Profit float64
+		Cost   float64
+	}
+	var items []bizItem
+	var totalSales float64
+	for _, row := range rows {
+		if tushare.GetString(row, "end_date") != latestPeriod {
+			break
+		}
+		name := tushare.GetString(row, "bz_item")
+		sales := tushare.GetFloat(row, "bz_sales")
+		if name == "" || sales <= 0 {
+			continue
+		}
+		items = append(items, bizItem{
+			Name:   name,
+			Sales:  sales,
+			Profit: tushare.GetFloat(row, "bz_profit"),
+			Cost:   tushare.GetFloat(row, "bz_cost"),
+		})
+		totalSales += sales
+	}
+	if totalSales == 0 {
+		return nil
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Sales > items[j].Sales
+	})
+
+	var result []map[string]any
+	for _, it := range items {
+		share := math.Round(it.Sales / totalSales * 1000) / 10
+		var margin float64
+		if it.Sales > 0 && it.Profit != 0 {
+			margin = math.Round(it.Profit / it.Sales * 1000) / 10
+		} else if it.Sales > 0 && it.Cost > 0 {
+			margin = math.Round((it.Sales - it.Cost) / it.Sales * 1000) / 10
+		}
+		result = append(result, map[string]any{
+			"name":   it.Name,
+			"share":  share,
+			"margin": margin,
+		})
+	}
+	return result
+}

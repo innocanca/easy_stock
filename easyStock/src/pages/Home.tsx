@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { DimensionBars } from "@/components/DimensionBars";
 import { TrendSpark } from "@/components/TrendSpark";
-import { fetchPicks, type PicksPageResponse } from "@/api/stockApi";
+import { MarkdownBody } from "@/components/MarkdownBody";
+import { getApiBase } from "@/api/client";
+import { fetchPicks, fetchPickStyles, type PicksPageResponse, type PickStyleInfo } from "@/api/stockApi";
 
 /** 与后端默认一致：500 亿人民币（万元） */
 const MIN_MV_WAN = 5_000_000;
@@ -26,6 +28,76 @@ export function Home() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
   const [scoreMin, setScoreMin] = useState(1);
+  const [style, setStyle] = useState("balanced");
+  const [styles, setStyles] = useState<PickStyleInfo[]>([]);
+  const [aiMd, setAiMd] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiStatus, setAiStatus] = useState("");
+  const [aiError, setAiError] = useState("");
+  const aiAbortRef = useRef<AbortController | null>(null);
+
+  const startAiRecommend = useCallback(() => {
+    aiAbortRef.current?.abort();
+    setAiMd("");
+    setAiError("");
+    setAiLoading(true);
+    setAiStatus("正在获取候选股票池…");
+
+    const ctrl = new AbortController();
+    aiAbortRef.current = ctrl;
+    const base = getApiBase();
+    const url = `${base}/api/picks/ai-recommend?style=${encodeURIComponent(style)}`;
+
+    fetch(url, { signal: ctrl.signal })
+      .then(async (res) => {
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let md = "";
+        let currentEvent = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith("data: ") && currentEvent) {
+              try {
+                const payload = JSON.parse(line.slice(6)) as string;
+                if (currentEvent === "chunk") {
+                  md += payload;
+                  setAiMd(md);
+                } else if (currentEvent === "status") {
+                  setAiStatus(payload);
+                } else if (currentEvent === "error") {
+                  setAiError(payload);
+                }
+              } catch { /* skip malformed */ }
+              currentEvent = "";
+            }
+          }
+        }
+        setAiLoading(false);
+        setAiStatus("");
+      })
+      .catch((e: unknown) => {
+        if ((e as Error).name !== "AbortError") {
+          setAiError(e instanceof Error ? e.message : "请求失败");
+        }
+        setAiLoading(false);
+      });
+  }, [style]);
+
+  useEffect(() => {
+    fetchPickStyles()
+      .then((s) => setStyles(Array.isArray(s) ? s : []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancel = false;
@@ -36,6 +108,7 @@ export function Home() {
       minMvWan: MIN_MV_WAN,
       scoreMin,
       scoreMax: 99,
+      style,
     })
       .then((d) => {
         if (cancel) return;
@@ -53,7 +126,7 @@ export function Home() {
     return () => {
       cancel = true;
     };
-  }, [page, pageSize, scoreMin]);
+  }, [page, pageSize, scoreMin, style]);
 
   const totalPages = useMemo(() => {
     if (!data) return 1;
@@ -66,6 +139,12 @@ export function Home() {
   const pageOptions = useMemo(() => {
     return Array.from({ length: totalPages }, (_, i) => i + 1);
   }, [totalPages]);
+
+  function onStyleChange(id: string) {
+    setStyle(id);
+    setPage(1);
+    setData(null);
+  }
 
   function onScorePreset(min: number) {
     setScoreMin(min);
@@ -132,6 +211,49 @@ export function Home() {
           市值 ≥ 500 亿人民币 · 按综合评分从高到低排序 · 可筛选分数并分页浏览
         </p>
       </header>
+
+      {styles.length > 0 && (
+        <div className="style-tabs">
+          {styles.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={`style-tab${style === s.id ? " style-tab--active" : ""}`}
+              onClick={() => onStyleChange(s.id)}
+              title={s.desc}
+            >
+              {s.label}
+            </button>
+          ))}
+          <span className="style-desc">
+            {styles.find((s) => s.id === style)?.desc ?? ""}
+          </span>
+          <button
+            type="button"
+            className="ai-recommend-btn"
+            onClick={startAiRecommend}
+            disabled={aiLoading}
+          >
+            {aiLoading ? "AI 分析中…" : "AI 智选"}
+          </button>
+        </div>
+      )}
+
+      {(aiMd || aiLoading || aiError) && (
+        <div className="ai-recommend-panel">
+          <div className="ai-recommend-header">
+            <h3 className="ai-recommend-title">AI 智能选股</h3>
+            {!aiLoading && aiMd && (
+              <button type="button" className="ai-recommend-close" onClick={() => { setAiMd(""); setAiError(""); }}>
+                收起
+              </button>
+            )}
+          </div>
+          {aiStatus && <p className="ai-recommend-status">{aiStatus}</p>}
+          {aiError && <p className="ai-recommend-error">{aiError}</p>}
+          {aiMd && <MarkdownBody markdown={aiMd} className="ai-recommend-body" />}
+        </div>
+      )}
 
       <div className="home-picks-toolbar">
         <div className="home-picks-toolbar-row">

@@ -6,6 +6,12 @@ import type {
 } from "@shared/dataset";
 import { apiGet, getApiBase } from "./client";
 
+export interface PickStyleInfo {
+  id: string;
+  label: string;
+  desc: string;
+}
+
 export type PicksQuery = {
   page?: number;
   pageSize?: number;
@@ -13,6 +19,7 @@ export type PicksQuery = {
   minMvWan?: number;
   scoreMin?: number;
   scoreMax?: number;
+  style?: string;
 };
 
 export type PicksPageResponse = {
@@ -32,6 +39,7 @@ export async function fetchPicks(q: PicksQuery = {}): Promise<PicksPageResponse>
   if (q.minMvWan != null) params.set("min_mv_wan", String(q.minMvWan));
   if (q.scoreMin != null) params.set("score_min", String(q.scoreMin));
   if (q.scoreMax != null) params.set("score_max", String(q.scoreMax));
+  if (q.style) params.set("style", q.style);
   const qs = params.toString();
   const raw = await apiGet<PicksPageResponse | PickItem[]>(`/api/picks${qs ? `?${qs}` : ""}`);
 
@@ -54,6 +62,10 @@ export async function fetchPicks(q: PicksQuery = {}): Promise<PicksPageResponse>
     ps = 12;
   }
   return { items, total, page, pageSize: ps };
+}
+
+export function fetchPickStyles(): Promise<PickStyleInfo[]> {
+  return apiGet<PickStyleInfo[]>("/api/picks/styles");
 }
 
 /** 补齐数组与数值，避免个股页因字段缺失运行时崩溃（白屏）。 */

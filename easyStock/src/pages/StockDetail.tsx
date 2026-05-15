@@ -11,10 +11,19 @@ import {
 } from "recharts";
 import type { StockDetail as StockDetailT } from "@shared/dataset";
 import { fetchStock, fetchPeHistory, type PeHistoryPoint } from "@/api/stockApi";
+import { getApiBase } from "@/api/client";
 import { sectorNameToId } from "@/utils/sector";
 import { Spinner } from "@/components/Spinner";
 import { AiChat } from "@/components/AiChat";
 import { getWatchlist, toggleWatchlist } from "@/utils/watchlist";
+
+interface CninfoNewsItem {
+  title: string;
+  date: string;
+  url: string;
+  type: string;
+  size_mb?: string;
+}
 
 const TABS = [
   { id: "finance", label: "财务概览" },
@@ -37,6 +46,8 @@ export function StockDetail() {
   const [inWatchlist, setInWatchlist] = useState(false);
   const [peHistory, setPeHistory] = useState<PeHistoryPoint[]>([]);
   const [peLoading, setPeLoading] = useState(false);
+  const [newsItems, setNewsItems] = useState<CninfoNewsItem[]>([]);
+  const [newsLoading, setNewsLoading] = useState(false);
 
   useEffect(() => {
     setInWatchlist(getWatchlist().some((w: { code: string }) => w.code === decoded));
@@ -51,6 +62,19 @@ export function StockDetail() {
         .finally(() => setPeLoading(false));
     }
   }, [tab, decoded, peHistory.length]);
+
+  useEffect(() => {
+    if (tab === "news" && newsItems.length === 0 && stock) {
+      setNewsLoading(true);
+      const base = getApiBase();
+      const qs = new URLSearchParams({ code: stock.code, name: stock.name });
+      fetch(`${base}/api/cninfo/news?${qs}`)
+        .then((r) => r.json())
+        .then((data) => setNewsItems(data ?? []))
+        .catch(() => {})
+        .finally(() => setNewsLoading(false));
+    }
+  }, [tab, stock, newsItems.length]);
 
   useEffect(() => {
     let cancel = false;
@@ -142,7 +166,11 @@ export function StockDetail() {
             >
               {inWatchlist ? "★ 已加自选" : "☆ 加入自选"}
             </button>
-            <Link to="/report" className="report-btn" style={{ textDecoration: "none", fontSize: "0.82rem" }}>
+            <Link
+              to={`/report?code=${encodeURIComponent(stock.code)}&name=${encodeURIComponent(stock.name)}`}
+              className="report-btn"
+              style={{ textDecoration: "none", fontSize: "0.82rem" }}
+            >
               查看年报 →
             </Link>
           </div>
@@ -404,15 +432,49 @@ export function StockDetail() {
           <AiChat stockCode={stock.code} stockName={stock.name} />
         )}
         {tab === "news" && (
-          <ul className="news-list">
-            {stock.news.map((n) => (
-              <li key={n.time + n.title}>
-                <span className="news-time">{n.time}</span>
-                {n.major ? <span className="tag">重大</span> : null}{" "}
-                {n.title}
-              </li>
-            ))}
-          </ul>
+          <div>
+            {newsLoading && <Spinner text="正在从巨潮资讯网获取公告…" />}
+            {!newsLoading && newsItems.length === 0 && (
+              <p style={{ color: "var(--muted)", fontSize: "0.88rem" }}>暂无公告数据</p>
+            )}
+            {!newsLoading && newsItems.length > 0 && (
+              <table>
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>类型</th>
+                    <th>标题</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {newsItems.map((n, i) => (
+                    <tr key={`${n.date}-${i}`}>
+                      <td style={{ whiteSpace: "nowrap", fontSize: "0.82rem" }}>{n.date}</td>
+                      <td>
+                        <span className="tag" style={{ fontSize: "0.72rem" }}>{n.type}</span>
+                      </td>
+                      <td>
+                        <a
+                          href={n.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "var(--accent)", textDecoration: "none", fontSize: "0.88rem" }}
+                        >
+                          {n.title}
+                        </a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <p style={{ marginTop: "0.75rem", fontSize: "0.75rem", color: "var(--muted)" }}>
+              数据来源：
+              <a href="http://www.cninfo.com.cn" target="_blank" rel="noopener noreferrer" style={{ color: "var(--muted)" }}>
+                巨潮资讯网
+              </a>
+            </p>
+          </div>
         )}
       </div>
     </>

@@ -24,6 +24,7 @@ func main() {
 	if token != "" {
 		tc = tushare.NewClient(token)
 		log.Printf("Tushare: GET /api/picks, /api/stocks/{code}, /api/sectors* use live data only (no mock fallback when token missing).")
+		live.WarmUpPicks(tc)
 	}
 
 	mux := http.NewServeMux()
@@ -56,6 +57,12 @@ func main() {
 		}
 		b, _ := json.Marshal(out)
 		writeJSON(w, b)
+	})
+
+	mux.HandleFunc("GET /api/picks/styles", func(w http.ResponseWriter, _ *http.Request) {
+		b, _ := json.Marshal(live.ListPickStyles())
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
 	})
 
 	mux.HandleFunc("GET /api/picks", func(w http.ResponseWriter, r *http.Request) {
@@ -162,6 +169,12 @@ func main() {
 	mux.HandleFunc("DELETE /api/reports/{stock_code}/{year}", rh.HandleDelete)
 
 	mux.HandleFunc("POST /api/chat", rh.HandleChat)
+	mux.HandleFunc("GET /api/cninfo/reports", rh.HandleCninfoSearch)
+	mux.HandleFunc("GET /api/cninfo/news", rh.HandleCninfoNews)
+	mux.HandleFunc("POST /api/cninfo/analyze", rh.HandleCninfoAnalyze)
+	mux.HandleFunc("GET /api/picks/ai-recommend", func(w http.ResponseWriter, r *http.Request) {
+		rh.HandleAiRecommend(w, r, tc)
+	})
 
 	mux.HandleFunc("GET /api/wiki", rh.HandleWikiList)
 	mux.HandleFunc("GET /api/wiki/{stock_code}/meta", rh.HandleWikiMeta)

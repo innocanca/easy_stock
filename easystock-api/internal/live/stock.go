@@ -128,18 +128,35 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 				return tushare.GetString(fiRows[i], "end_date") > tushare.GetString(fiRows[j], "end_date")
 			})
 			latestFi = fiRows[0]
-			roe = tushare.GetFloat(latestFi, "roe")
+
+			// Pick annual reports (end_date ending with "1231") for ROE display
+			// and use the latest annual ROE as the headline value.
+			seenYear := map[string]bool{}
 			for _, row := range fiRows {
-				if len(roeSeries) >= 5 {
-					break
-				}
 				ed := tushare.GetString(row, "end_date")
-				if len(ed) < 4 {
+				if len(ed) < 8 {
+					continue
+				}
+				if ed[4:] != "1231" {
 					continue
 				}
 				y := ed[:4]
+				if seenYear[y] {
+					continue
+				}
+				seenYear[y] = true
 				r := tushare.GetFloat(row, "roe")
+				if len(roeSeries) == 0 {
+					roe = r
+				}
 				roeSeries = append(roeSeries, map[string]any{"y": y, "roe": math.Round(r*10) / 10})
+				if len(roeSeries) >= 5 {
+					break
+				}
+			}
+			// Fallback: if no annual data, use latest quarter
+			if roe == 0 && latestFi != nil {
+				roe = tushare.GetFloat(latestFi, "roe")
 			}
 		}
 	}
@@ -176,6 +193,10 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 	if fl == nil {
 		fl = []map[string]any{}
 	}
+	biz := stockBusinessSegments(c, tsCode)
+	if biz == nil {
+		biz = []map[string]any{}
+	}
 
 	sectorAvgPe := computeSectorAvgPe(c, sb.Industry, date)
 	pePctHistory := computePePctHistory(c, tsCode, pe)
@@ -197,7 +218,7 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 		"growthSummary":    "可继续接入业绩预告、研报摘要等。",
 		"revenueGrowth":    []map[string]any{},
 		"financeRows":      financeRows,
-		"businessSegments": []map[string]any{},
+		"businessSegments": biz,
 		"shareholders":     sh,
 		"dividends":        div,
 		"flows":            fl,
