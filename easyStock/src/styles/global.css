@@ -2095,24 +2095,11 @@ table {
   }
 }
 
-/* —— 流式上传 + Wiki —— */
-.report-stream-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-}
-
-.report-stream-modal {
-  width: min(920px, 100%);
-  max-height: min(88vh, 900px);
+/* —— 年报分析：内联流式 Markdown —— */
+.report-stream-panel {
+  margin-top: 1.25rem;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
 
 .report-stream-head {
@@ -2136,8 +2123,8 @@ table {
 }
 
 .report-stream-md {
-  flex: 1;
-  min-height: 0;
+  min-height: 280px;
+  max-height: min(70vh, 720px);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);

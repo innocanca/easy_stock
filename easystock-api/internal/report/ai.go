@@ -504,6 +504,34 @@ func (c *AIClient) WikiSystemPrompt(hasContext bool) string {
 	return wikiPrompt
 }
 
+// ---- Upload stream: core summary first (markdown, streaming) ----
+
+const streamSummaryPrompt = `你是资深证券与财报分析师。请**仅依据**用户给出的年报文本撰写核心摘要（若文本过短、乱码或明显无法识别，请直接说明）。
+
+输出要求：
+- 使用 Markdown，可用 ##、### 与要点列表，结构清晰。
+- 覆盖：**经营与战略要点**、**主要财务表现**（只写文中出现的数字；没有的写「原文未披露」）、**业务/收入结构**（如有）、**主要风险**、**管理层展望**。
+- 客观克制，不要编造数字。
+- 篇幅约 800–2000 字；直接输出 Markdown，不要用 fenced 代码块整篇包裹。`
+
+const streamSummaryWithContextPrompt = `你是资深证券与财报分析师。用户提供了该公司以往年份的摘要（「已有知识库」）与本年度年报文本。
+
+请**仅依据本年度文本**撰写核心摘要，并**适当对照**已有知识库指出延续或变化（不要臆测未披露数据）。
+
+输出要求：
+- 使用 Markdown，可用 ##、### 与要点列表。
+- 覆盖：**经营与战略要点**、**主要财务表现**（只写本年度文本中的数字）、**业务/收入结构**（如有）、**主要风险**、**管理层展望**；在相关小节简要对比往年（若有依据）。
+- 不要编造数字；不确定处说明「原文未披露」。
+- 篇幅约 800–2000 字；直接输出 Markdown，不要用 fenced 代码块整篇包裹。`
+
+// SummaryStreamSystemPrompt is used for upload SSE: summarize first, stream tokens.
+func (c *AIClient) SummaryStreamSystemPrompt(hasContext bool) string {
+	if hasContext {
+		return streamSummaryWithContextPrompt
+	}
+	return streamSummaryPrompt
+}
+
 // ---- Utilities ----
 
 func extractJSONObject(s string) string {
