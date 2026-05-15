@@ -6,6 +6,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@cursor/sdk": "latest"
+    "@cursor/sdk": "latest",
+    "@cursor/sdk-win32-x64": "^1.0.13"
   }
 }

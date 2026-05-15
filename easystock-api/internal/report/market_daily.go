@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"easystock/api/internal/live"
 	"easystock/api/internal/tushare"
@@ -100,14 +101,27 @@ func (h *Handler) HandleMarketCollect(w http.ResponseWriter, r *http.Request, tc
 	userMsg := formatSnapshotForAI(snap)
 
 	ch := make(chan string, 64)
-	var streamErr error
-	go func() { streamErr = h.AI.CallStream(MarketDailySystemPrompt, userMsg, ch) }()
+	errCh := make(chan error, 1)
+	go func() { errCh <- h.AI.CallStream(MarketDailySystemPrompt, userMsg, ch) }()
+
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
 
 	var summaryBuf strings.Builder
-	for token := range ch {
-		summaryBuf.WriteString(token)
-		sseQuoted(w, "chunk", token)
+	for {
+		select {
+		case token, ok := <-ch:
+			if !ok {
+				goto aiStreamDone
+			}
+			summaryBuf.WriteString(token)
+			sseQuoted(w, "chunk", token)
+		case <-ticker.C:
+			sseKeepalive(w)
+		}
 	}
+aiStreamDone:
+	streamErr := <-errCh
 
 	if streamErr != nil {
 		log.Printf("market daily AI error: %v", streamErr)

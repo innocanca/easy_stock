@@ -134,6 +134,10 @@ export default function Market() {
     });
     es.onerror = () => {
       setLoading(false);
+      setError((prev) =>
+        prev ||
+          "连接已断开（常见于 AI 首段输出较慢或开发代理超时）。请重试；若反复出现，可在 .env 设置 VITE_API_URL=http://127.0.0.1:4000 直连后端。",
+      );
       es.close();
     };
   }, [fetchHistory]);

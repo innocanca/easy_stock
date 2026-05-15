@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Handler struct {
@@ -37,6 +38,14 @@ func sseEvent(w http.ResponseWriter, event, data string) {
 func sseQuoted(w http.ResponseWriter, event, s string) {
 	b, _ := json.Marshal(s)
 	sseEvent(w, event, string(b))
+}
+
+// sseKeepalive sends an SSE comment line so proxies do not treat the stream as idle.
+func sseKeepalive(w http.ResponseWriter) {
+	fmt.Fprintf(w, ": ping\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ---- Upload (original synchronous) ----
@@ -605,8 +614,10 @@ func (h *Handler) streamSinglePass(w http.ResponseWriter, text, stockName, stock
 	userMsg := h.AI.WikiUserMsg(text, stockName, stockCode, year, existingWiki)
 
 	ch := make(chan string, 64)
-	var streamErr error
-	go func() { streamErr = h.AI.CallStream(systemPrompt, userMsg, ch) }()
+	errCh := make(chan error, 1)
+	start := time.Now()
+	log.Printf("cninfo: single-pass start %s %d (provider=%s text_chars=%d ctx_chars=%d)", stockCode, year, h.AI.ProviderInfo(), len(text), len(existingWiki))
+	go func() { errCh <- h.AI.CallStream(systemPrompt, userMsg, ch) }()
 
 	var buf strings.Builder
 	for token := range ch {
@@ -614,10 +625,15 @@ func (h *Handler) streamSinglePass(w http.ResponseWriter, text, stockName, stock
 		sseQuoted(w, "wiki_chunk", token)
 	}
 
+	streamErr := <-errCh
 	if streamErr != nil {
-		log.Printf("cninfo: single-pass failed: %v", streamErr)
+		log.Printf("cninfo: single-pass failed %s %d after %s: %v", stockCode, year, time.Since(start).Round(time.Millisecond), streamErr)
 		sseQuoted(w, "error", "分析生成失败: "+streamErr.Error())
 		return ""
+	}
+	log.Printf("cninfo: single-pass done %s %d dur=%s out_chars=%d", stockCode, year, time.Since(start).Round(time.Millisecond), buf.Len())
+	if strings.TrimSpace(buf.String()) == "" {
+		log.Printf("cninfo: single-pass warning: empty output %s %d (provider=%s)", stockCode, year, h.AI.ProviderInfo())
 	}
 	return buf.String()
 }
@@ -630,6 +646,10 @@ func (h *Handler) saveCninfoWiki(w http.ResponseWriter, stockCode string, year i
 
 	if err := h.Store.SaveWiki(stockCode, year, content); err != nil {
 		log.Printf("cninfo: save wiki failed: %v", err)
+	}
+	if strings.TrimSpace(content) == "" {
+		log.Printf("cninfo: warning: saved empty analysis for %s %d (raw_chars=%d provider=%s raw_preview=%q)",
+			stockCode, year, len(raw), h.AI.ProviderInfo(), truncStr(strings.TrimSpace(raw), 400))
 	}
 	log.Printf("cninfo: analysis saved for %s %d (%d chars)", stockCode, year, len(content))
 	sseQuoted(w, "status", "分析已保存至知识库")

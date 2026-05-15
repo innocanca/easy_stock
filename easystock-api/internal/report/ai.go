@@ -140,11 +140,20 @@ func (c *AIClient) callCursor(system, user string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	log.Printf("report/ai: calling cursor-sdk (%s)", c.CursorModel)
+	start := time.Now()
+	log.Printf("report/ai: cursor-sdk start model=%s node=%q script_dir=%q tmp=%q sys_chars=%d user_chars=%d",
+		c.CursorModel, c.NodeBin, c.ScriptDir, tmpPath, len(system), len(user))
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("cursor-sdk failed: %w\nstderr: %s", err, stderr.String())
+		return "", fmt.Errorf("cursor-sdk failed after %s: %w\nstderr: %s",
+			time.Since(start).Round(time.Millisecond), err, truncStr(stderr.String(), 4000))
 	}
-	return stdout.String(), nil
+	out := stdout.String()
+	log.Printf("report/ai: cursor-sdk done model=%s dur=%s out_chars=%d stderr_chars=%d",
+		c.CursorModel, time.Since(start).Round(time.Millisecond), len(out), stderr.Len())
+	if strings.TrimSpace(out) == "" {
+		log.Printf("report/ai: cursor-sdk warning: empty output (stderr=%q)", truncStr(stderr.String(), 400))
+	}
+	return out, nil
 }
 
 func (c *AIClient) callCursorStream(system, user string, ch chan<- string) error {
@@ -168,16 +177,22 @@ func (c *AIClient) callCursorStream(system, user string, ch chan<- string) error
 	var stderrBuf bytes.Buffer
 	go func() { _, _ = io.Copy(&stderrBuf, stderrPipe) }()
 
-	log.Printf("report/ai: calling cursor-sdk stream (%s)", c.CursorModel)
+	start := time.Now()
+	log.Printf("report/ai: cursor-sdk stream start model=%s node=%q script_dir=%q tmp=%q sys_chars=%d user_chars=%d",
+		c.CursorModel, c.NodeBin, c.ScriptDir, tmpPath, len(system), len(user))
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
 
 	rd := bufio.NewReader(stdout)
 	buf := make([]byte, 4096)
+	bytesOut := 0
+	chunks := 0
 	for {
 		n, readErr := rd.Read(buf)
 		if n > 0 {
+			bytesOut += n
+			chunks++
 			ch <- string(buf[:n])
 		}
 		if readErr == io.EOF {
@@ -190,7 +205,13 @@ func (c *AIClient) callCursorStream(system, user string, ch chan<- string) error
 	}
 
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("cursor-sdk failed: %w\nstderr: %s", err, stderrBuf.String())
+		return fmt.Errorf("cursor-sdk stream failed after %s (bytes_out=%d chunks=%d): %w\nstderr: %s",
+			time.Since(start).Round(time.Millisecond), bytesOut, chunks, err, truncStr(stderrBuf.String(), 4000))
+	}
+	log.Printf("report/ai: cursor-sdk stream done model=%s dur=%s bytes_out=%d chunks=%d stderr_chars=%d",
+		c.CursorModel, time.Since(start).Round(time.Millisecond), bytesOut, chunks, stderrBuf.Len())
+	if bytesOut == 0 {
+		log.Printf("report/ai: cursor-sdk stream warning: no stdout emitted (stderr=%q)", truncStr(stderrBuf.String(), 600))
 	}
 	return nil
 }
@@ -645,4 +666,14 @@ func truncBody(b []byte) string {
 		return s[:500] + "..."
 	}
 	return s
+}
+
+func truncStr(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }

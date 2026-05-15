@@ -31,7 +31,9 @@ const modelId = input.model || "claude-sonnet-4-6";
 const agent = await Agent.create({
   apiKey,
   model: { id: modelId },
-  local: { cwd: process.cwd() },
+  // Use cloud runtime to avoid local-runtime prerequisites (e.g. ripgrep).
+  // This bridge uses Cursor as an LLM provider, not as a codebase tool runner.
+  cloud: { repos: [] },
 });
 
 try {
@@ -59,5 +61,10 @@ try {
     process.stdout.write(result);
   }
 } finally {
-  agent.close();
+  // Prefer SDK dispose; fall back to legacy close if present.
+  if (agent?.[Symbol.asyncDispose]) {
+    await agent[Symbol.asyncDispose]();
+  } else if (agent?.close) {
+    agent.close();
+  }
 }
