@@ -133,9 +133,16 @@ func fetchIndices(c *tushare.Client, date string) ([]IndexPoint, error) {
 }
 
 func fetchBreadth(c *tushare.Client, date string) (MarketBreadth, float64, error) {
-	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pct_chg,total_mv,amount")
+	// pct_chg and amount belong to "daily", not "daily_basic"
+	resp, err := c.Call("daily", map[string]any{
+		"trade_date": date,
+	}, "ts_code,pct_chg,amount")
 	if err != nil {
-		return MarketBreadth{}, 0, err
+		return MarketBreadth{}, 0, fmt.Errorf("daily: %w", err)
+	}
+	rows, err := tushare.RowsToMaps(resp)
+	if err != nil || len(rows) == 0 {
+		return MarketBreadth{}, 0, fmt.Errorf("daily: empty for %s", date)
 	}
 	var b MarketBreadth
 	var totalAmt float64
@@ -215,9 +222,29 @@ func fetchSectorChanges(c *tushare.Client, date string) (top []SectorChange, bot
 	if err != nil {
 		return nil, nil
 	}
-	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm,pct_chg")
+
+	// pct_chg from "daily"; pe_ttm from "daily_basic"
+	dailyResp, err := c.Call("daily", map[string]any{
+		"trade_date": date,
+	}, "ts_code,pct_chg")
 	if err != nil {
 		return nil, nil
+	}
+	dailyRows, err := tushare.RowsToMaps(dailyResp)
+	if err != nil {
+		return nil, nil
+	}
+	pctMap := make(map[string]float64, len(dailyRows))
+	for _, r := range dailyRows {
+		code := tushare.GetString(r, "ts_code")
+		pctMap[code] = tushare.GetFloat(r, "pct_chg")
+	}
+
+	dbRows, _ := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm")
+	peMap := make(map[string]float64, len(dbRows))
+	for _, r := range dbRows {
+		code := tushare.GetString(r, "ts_code")
+		peMap[code] = tushare.GetFloat(r, "pe_ttm")
 	}
 
 	type accum struct {
@@ -227,8 +254,7 @@ func fetchSectorChanges(c *tushare.Client, date string) (top []SectorChange, bot
 		peCnt  int
 	}
 	byIndustry := make(map[string]*accum)
-	for _, r := range rows {
-		code := tushare.GetString(r, "ts_code")
+	for code, pct := range pctMap {
 		sb, ok := names[code]
 		if !ok || sb.Industry == "" {
 			continue
@@ -238,10 +264,9 @@ func fetchSectorChanges(c *tushare.Client, date string) (top []SectorChange, bot
 			a = &accum{}
 			byIndustry[sb.Industry] = a
 		}
-		pct := tushare.GetFloat(r, "pct_chg")
-		pe := tushare.GetFloat(r, "pe_ttm")
 		a.sumPct += pct
 		a.count++
+		pe := peMap[code]
 		if pe > 0 && pe < 1000 {
 			a.sumPe += pe
 			a.peCnt++
@@ -312,7 +337,13 @@ func fetchPrevDayAmount(c *tushare.Client, date string) float64 {
 	sort.Sort(sort.Reverse(sort.StringSlice(dates)))
 	prevDate := dates[0]
 
-	prevRows, err := DailyBasicByTradeDate(c, prevDate, "ts_code,amount")
+	prevResp, err := c.Call("daily", map[string]any{
+		"trade_date": prevDate,
+	}, "ts_code,amount")
+	if err != nil {
+		return 0
+	}
+	prevRows, err := tushare.RowsToMaps(prevResp)
 	if err != nil {
 		return 0
 	}
