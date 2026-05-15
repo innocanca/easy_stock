@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ func main() {
 		tc = tushare.NewClient(token)
 		log.Printf("Tushare: GET /api/picks, /api/stocks/{code}, /api/sectors* use live data only (no mock fallback when token missing).")
 		live.WarmUpPicks(tc)
+		startMarketScheduler(tc)
 	}
 
 	mux := http.NewServeMux()
@@ -162,6 +164,19 @@ func main() {
 	})
 
 	rh := report.NewHandler()
+	ms := live.NewMarketStore()
+
+	// Market daily APIs
+	mux.HandleFunc("GET /api/market/collect", func(w http.ResponseWriter, r *http.Request) {
+		rh.HandleMarketCollect(w, r, tc, ms)
+	})
+	mux.HandleFunc("GET /api/market/daily", func(w http.ResponseWriter, r *http.Request) {
+		rh.HandleMarketDaily(w, r, ms)
+	})
+	mux.HandleFunc("GET /api/market/history", func(w http.ResponseWriter, r *http.Request) {
+		rh.HandleMarketHistory(w, r, ms)
+	})
+
 	mux.HandleFunc("POST /api/reports/upload", rh.HandleUpload)
 	mux.HandleFunc("POST /api/reports/upload/stream", rh.HandleUploadStream)
 	mux.HandleFunc("GET /api/reports/{stock_code}", rh.HandleList)
@@ -223,6 +238,95 @@ func loadDotEnv() {
 			log.Printf("env: loaded %q", p)
 		}
 	}
+}
+
+// startMarketScheduler launches a background goroutine that collects market
+// data and generates an AI summary every trading day after 18:30 CST.
+func startMarketScheduler(tc *tushare.Client) {
+	ms := live.NewMarketStore()
+	ai := report.NewAIClient()
+	go func() {
+		cst := time.FixedZone("CST", 8*3600)
+		for {
+			now := time.Now().In(cst)
+			// Target 18:30 CST today (or tomorrow if already past)
+			target := time.Date(now.Year(), now.Month(), now.Day(), 18, 30, 0, 0, cst)
+			if now.After(target) {
+				target = target.Add(24 * time.Hour)
+			}
+			sleepDur := time.Until(target)
+			log.Printf("market scheduler: next check at %s (sleeping %s)", target.Format("2006-01-02 15:04"), sleepDur.Round(time.Second))
+			time.Sleep(sleepDur)
+
+			date, err := live.LatestTradeDate(tc)
+			if err != nil {
+				log.Printf("market scheduler: skip — %v", err)
+				continue
+			}
+
+			if ms.HasSnapshot(date) {
+				log.Printf("market scheduler: %s already collected, skip", date)
+				continue
+			}
+
+			log.Printf("market scheduler: collecting %s…", date)
+			snap, err := live.CollectMarketSnapshot(tc, date)
+			if err != nil {
+				log.Printf("market scheduler: collect failed — %v", err)
+				continue
+			}
+			if err := ms.SaveSnapshot(snap); err != nil {
+				log.Printf("market scheduler: save snapshot failed — %v", err)
+			}
+
+			if ai.Ready() {
+				prompt := formatSnapshotPrompt(snap)
+				ch := make(chan string, 64)
+				var buf strings.Builder
+				go func() {
+					_ = ai.CallStream(report.MarketDailySystemPrompt, prompt, ch)
+				}()
+				for tok := range ch {
+					buf.WriteString(tok)
+				}
+				if buf.Len() > 0 {
+					if err := ms.SaveSummary(date, buf.String()); err != nil {
+						log.Printf("market scheduler: save summary failed — %v", err)
+					} else {
+						log.Printf("market scheduler: %s summary saved (%d chars)", date, buf.Len())
+					}
+				}
+			}
+		}
+	}()
+}
+
+func formatSnapshotPrompt(snap *live.MarketSnapshot) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# A股市场日报数据 — %s\n\n", snap.Date))
+	sb.WriteString("## 三大指数\n\n| 指数 | 收盘 | 涨跌幅 | 成交额(亿) |\n|------|------|--------|------------|\n")
+	for _, idx := range snap.Indices {
+		sb.WriteString(fmt.Sprintf("| %s | %.2f | %.2f%% | %.1f |\n", idx.Name, idx.Close, idx.ChgPct, idx.Amount))
+	}
+	sb.WriteString(fmt.Sprintf("\n## 市场宽度\n- 上涨: %d / 下跌: %d / 平盘: %d\n- 涨停: %d / 跌停: %d\n",
+		snap.Breadth.UpCount, snap.Breadth.DownCount, snap.Breadth.FlatCount,
+		snap.Breadth.LimitUpCount, snap.Breadth.LimitDownCount))
+	sb.WriteString(fmt.Sprintf("\n## 成交量\n- 全市场: %.1f 亿 (较前日 %.2f%%)\n", snap.TotalAmount, snap.AmountChgPct))
+	sb.WriteString(fmt.Sprintf("\n## 北向资金\n- 沪股通: %.2f 亿 / 深股通: %.2f 亿 / 合计: %.2f 亿\n",
+		snap.NorthFlow.HgtNetBuy, snap.NorthFlow.SgtNetBuy, snap.NorthFlow.TotalNet))
+	if len(snap.TopSectors) > 0 {
+		sb.WriteString("\n## 领涨板块\n")
+		for _, s := range snap.TopSectors {
+			sb.WriteString(fmt.Sprintf("- %s: %.2f%%\n", s.Name, s.ChgPct))
+		}
+	}
+	if len(snap.BottomSectors) > 0 {
+		sb.WriteString("\n## 领跌板块\n")
+		for _, s := range snap.BottomSectors {
+			sb.WriteString(fmt.Sprintf("- %s: %.2f%%\n", s.Name, s.ChgPct))
+		}
+	}
+	return sb.String()
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

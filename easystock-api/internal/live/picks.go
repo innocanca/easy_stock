@@ -23,6 +23,9 @@ type PickItem struct {
 	Roe             float64        `json:"roe"`
 	ProfitGrowthYoy float64        `json:"profitGrowthYoy"`
 	TurnoverRate    float64        `json:"turnoverRate"`
+	VolumeRatio     float64        `json:"volumeRatio"`
+	Close           float64        `json:"close"`
+	PricePct        float64        `json:"pricePct"`
 	Dimensions      map[string]int `json:"dimensions"`
 	ScoreNote       string         `json:"scoreNote"`
 	ProfitTrend     []profitTrend  `json:"profitTrend"`
@@ -156,7 +159,57 @@ func TopPicksForAI(c *tushare.Client, styleID string, topN int) ([]PickItem, Pic
 	if topN > len(items) {
 		topN = len(items)
 	}
-	return items[:topN], style, nil
+	top := make([]PickItem, topN)
+	copy(top, items[:topN])
+
+	// Enrich with price percentile (concurrently, best-effort)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i := range top {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			top[idx].PricePct = pricePctile(c, top[idx].Code, top[idx].Close)
+		}(i)
+	}
+	wg.Wait()
+
+	return top, style, nil
+}
+
+// pricePctile computes where the current close price sits within the past ~1 year
+// of daily closes (0 = lowest, 100 = highest). Returns -1 on failure.
+func pricePctile(c *tushare.Client, tsCode string, curClose float64) float64 {
+	if curClose <= 0 {
+		return -1
+	}
+	resp, err := c.Call("daily", map[string]any{
+		"ts_code": tsCode,
+		"fields":  "close",
+	}, "close")
+	if err != nil {
+		return -1
+	}
+	rows, err := tushare.RowsToMaps(resp)
+	if err != nil || len(rows) < 20 {
+		return -1
+	}
+	// daily returns most recent first; take up to 250 trading days (~1 year)
+	limit := 250
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	below := 0
+	for _, r := range rows {
+		c := tushare.GetFloat(r, "close")
+		if c > 0 && curClose >= c {
+			below++
+		}
+	}
+	pct := float64(below) / float64(len(rows)) * 100
+	return math.Round(pct*10) / 10
 }
 
 // PicksJSON returns /api/picks JSON: 市值≥min_mv_wan（默认500亿）的全部标的，按综合分排序；支持 score 区间与分页。
@@ -256,7 +309,7 @@ func buildPicksFull(c *tushare.Client, minMvWan float64, style PickStyle) ([]Pic
 	if err != nil {
 		return nil, fmt.Errorf("stock_basic: %w", err)
 	}
-	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm,pb,total_mv,circ_mv,turnover_rate")
+	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm,pb,total_mv,circ_mv,turnover_rate,turnover_rate_f,volume_ratio,close")
 	if err != nil {
 		return nil, err
 	}
@@ -400,6 +453,11 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 	pe := r.pe
 	mv := tushare.GetFloat(r.m, "total_mv")
 	turnoverRate := tushare.GetFloat(r.m, "turnover_rate_f")
+	if turnoverRate == 0 {
+		turnoverRate = tushare.GetFloat(r.m, "turnover_rate")
+	}
+	volumeRatio := tushare.GetFloat(r.m, "volume_ratio")
+	closePrice := tushare.GetFloat(r.m, "close")
 
 	fi := fetchFinaSnap(c, code)
 	profitPts, incErr := fetchQuarterlyProfitsYi(c, code)
@@ -463,6 +521,8 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 		Roe:             roe,
 		ProfitGrowthYoy: pgy,
 		TurnoverRate:    math.Round(turnoverRate*100) / 100,
+		VolumeRatio:     math.Round(volumeRatio*100) / 100,
+		Close:           math.Round(closePrice*100) / 100,
 		Dimensions:      dims,
 		ScoreNote:       note,
 		ProfitTrend:     pt,

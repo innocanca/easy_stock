@@ -5,6 +5,7 @@ import { TrendSpark } from "@/components/TrendSpark";
 import { MarkdownBody } from "@/components/MarkdownBody";
 import { getApiBase } from "@/api/client";
 import { fetchPicks, fetchPickStyles, type PicksPageResponse, type PickStyleInfo } from "@/api/stockApi";
+import { addToWatchlist, isInWatchlist } from "@/utils/watchlist";
 
 /** 与后端默认一致：500 亿人民币（万元） */
 const MIN_MV_WAN = 5_000_000;
@@ -34,12 +35,31 @@ export function Home() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiStatus, setAiStatus] = useState("");
   const [aiError, setAiError] = useState("");
+  const [aiStocks, setAiStocks] = useState<{ code: string; name: string }[]>([]);
+  const [watchlistVer, setWatchlistVer] = useState(0);
   const aiAbortRef = useRef<AbortController | null>(null);
+
+  const extractAiStocks = useCallback((md: string) => {
+    const codePattern = /(\d{6})\.(SH|SZ)/g;
+    const seen = new Set<string>();
+    const results: { code: string; name: string }[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = codePattern.exec(md)) !== null) {
+      const code = `${match[1]}.${match[2]}`;
+      if (seen.has(code)) continue;
+      seen.add(code);
+      const nameMatch = new RegExp(`([\\u4e00-\\u9fa5]{2,}).*?${match[1]}`).exec(md);
+      const name = nameMatch?.[1] ?? code;
+      results.push({ code, name });
+    }
+    setAiStocks(results);
+  }, []);
 
   const startAiRecommend = useCallback(() => {
     aiAbortRef.current?.abort();
     setAiMd("");
     setAiError("");
+    setAiStocks([]);
     setAiLoading(true);
     setAiStatus("正在获取候选股票池…");
 
@@ -82,6 +102,7 @@ export function Home() {
             }
           }
         }
+        extractAiStocks(md);
         setAiLoading(false);
         setAiStatus("");
       })
@@ -91,7 +112,7 @@ export function Home() {
         }
         setAiLoading(false);
       });
-  }, [style]);
+  }, [style, extractAiStocks]);
 
   useEffect(() => {
     fetchPickStyles()
@@ -252,6 +273,39 @@ export function Home() {
           {aiStatus && <p className="ai-recommend-status">{aiStatus}</p>}
           {aiError && <p className="ai-recommend-error">{aiError}</p>}
           {aiMd && <MarkdownBody markdown={aiMd} className="ai-recommend-body" />}
+          {aiStocks.length > 0 && !aiLoading && (
+            <div className="ai-recommend-actions">
+              <p className="ai-recommend-actions-label">AI 推荐股票：</p>
+              <div className="ai-recommend-actions-row">
+                {aiStocks.map((s) => {
+                  const inWl = isInWatchlist(s.code);
+                  return (
+                    <div key={s.code} className="ai-stock-chip">
+                      <Link to={`/stock/${encodeURIComponent(s.code)}`} className="ai-stock-chip-name">
+                        {s.name}
+                        <span className="ai-stock-chip-code">{s.code}</span>
+                      </Link>
+                      <button
+                        type="button"
+                        className={`ai-stock-chip-btn${inWl ? " ai-stock-chip-btn--added" : ""}`}
+                        onClick={() => {
+                          if (!inWl) {
+                            addToWatchlist({ code: s.code, name: s.name });
+                            setWatchlistVer((v) => v + 1);
+                          }
+                        }}
+                        disabled={inWl}
+                      >
+                        {inWl ? "已加入自选" : "+ 加入自选"}
+                      </button>
+                    </div>
+                  );
+                })}
+                {/* force re-render when watchlist changes */}
+                <span hidden>{watchlistVer}</span>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

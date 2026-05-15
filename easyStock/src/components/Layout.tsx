@@ -127,6 +127,9 @@ export function Layout() {
           <NavLink to="/watchlist" className={({ isActive }) => (isActive ? "active" : "")}>
             自选股
           </NavLink>
+          <NavLink to="/market" className={({ isActive }) => (isActive ? "active" : "")}>
+            大盘
+          </NavLink>
         </nav>
         <div className="sidebar-footer">
           <NavLink to="/chain" className="sidebar-footer-link">产业链（即将上线）</NavLink>
