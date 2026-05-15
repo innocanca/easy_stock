@@ -1,14 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import type { StockDetail as StockDetailT } from "@shared/dataset";
-import { fetchStock } from "@/api/stockApi";
+import { fetchStock, fetchPeHistory, type PeHistoryPoint } from "@/api/stockApi";
 import { sectorNameToId } from "@/utils/sector";
+import { Spinner } from "@/components/Spinner";
+import { AiChat } from "@/components/AiChat";
+import { getWatchlist, toggleWatchlist } from "@/utils/watchlist";
 
 const TABS = [
   { id: "finance", label: "财务概览" },
   { id: "business", label: "主业构成" },
   { id: "holders", label: "股东与分红" },
   { id: "flow", label: "资金与行情" },
+  { id: "pe-chart", label: "PE走势" },
+  { id: "ai", label: "AI问答" },
   { id: "news", label: "资讯" },
 ] as const;
 
@@ -20,6 +34,23 @@ export function StockDetail() {
   const [stock, setStock] = useState<StockDetailT | null | undefined>(undefined);
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("finance");
+  const [inWatchlist, setInWatchlist] = useState(false);
+  const [peHistory, setPeHistory] = useState<PeHistoryPoint[]>([]);
+  const [peLoading, setPeLoading] = useState(false);
+
+  useEffect(() => {
+    setInWatchlist(getWatchlist().some((w: { code: string }) => w.code === decoded));
+  }, [decoded]);
+
+  useEffect(() => {
+    if (tab === "pe-chart" && peHistory.length === 0) {
+      setPeLoading(true);
+      fetchPeHistory(decoded)
+        .then(setPeHistory)
+        .catch(() => {})
+        .finally(() => setPeLoading(false));
+    }
+  }, [tab, decoded, peHistory.length]);
 
   useEffect(() => {
     let cancel = false;
@@ -71,12 +102,7 @@ export function StockDetail() {
   }
 
   if (stock === undefined) {
-    return (
-      <>
-        <h1 className="page-title">个股</h1>
-        <p className="page-sub">加载中…</p>
-      </>
-    );
+    return <Spinner text="加载个股数据…" />;
   }
 
   if (stock === null) {
@@ -104,6 +130,21 @@ export function StockDetail() {
                 <Link to={`/sector/${sectorRouteId}`}>板块：{stock.sector}</Link>
               </span>
             </h1>
+          </div>
+          <div className="stock-actions">
+            <button
+              className={`btn-star${inWatchlist ? " active" : ""}`}
+              onClick={() => {
+                const item = { code: stock.code, name: stock.name };
+                toggleWatchlist(item);
+                setInWatchlist(!inWatchlist);
+              }}
+            >
+              {inWatchlist ? "★ 已加自选" : "☆ 加入自选"}
+            </button>
+            <Link to="/report" className="report-btn" style={{ textDecoration: "none", fontSize: "0.82rem" }}>
+              查看年报 →
+            </Link>
           </div>
         </div>
 
@@ -326,6 +367,41 @@ export function StockDetail() {
               )}
             </tbody>
           </table>
+        )}
+        {tab === "pe-chart" && (
+          <div>
+            {peLoading && <Spinner text="加载PE历史数据…" />}
+            {!peLoading && peHistory.length > 0 && (
+              <ResponsiveContainer width="100%" height={360}>
+                <LineChart data={peHistory} margin={{ top: 10, right: 20, bottom: 10, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 11 }}
+                    interval={Math.floor(peHistory.length / 6)}
+                  />
+                  <YAxis tick={{ fontSize: 11 }} domain={["dataMin", "dataMax"]} />
+                  <Tooltip
+                    contentStyle={{ fontSize: "0.82rem" }}
+                    formatter={(v) => [Number(v).toFixed(2), "PE(TTM)"]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="pe"
+                    stroke="#0ea5e9"
+                    dot={false}
+                    strokeWidth={1.5}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+            {!peLoading && peHistory.length === 0 && (
+              <p style={{ color: "var(--muted)", fontSize: "0.88rem" }}>暂无PE历史数据</p>
+            )}
+          </div>
+        )}
+        {tab === "ai" && (
+          <AiChat stockCode={stock.code} stockName={stock.name} />
         )}
         {tab === "news" && (
           <ul className="news-list">

@@ -14,11 +14,15 @@ import {
   deleteReport,
   fetchAnalysis,
   fetchReportList,
+  fetchWikiMerged,
+  fetchWikiMeta,
+  fetchWikiYear,
   uploadReportStream,
   type AnalysisResult,
   type ReportData,
 } from "@/api/reportApi";
 import { MarkdownBody } from "@/components/MarkdownBody";
+import { Spinner } from "@/components/Spinner";
 
 const COLORS = {
   revenue: "#2563eb",
@@ -41,7 +45,7 @@ const fmtPct = (v: number) => {
   return (v * 100).toFixed(1) + "%";
 };
 
-type Tab = "overview" | "growth" | "profit" | "structure" | "insight";
+type Tab = "overview" | "growth" | "profit" | "structure" | "insight" | "wiki";
 
 export function Report() {
   const [stockCode, setStockCode] = useState("000858.SZ");
@@ -58,6 +62,13 @@ export function Report() {
   const [streamOpen, setStreamOpen] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
   const [streamWiki, setStreamWiki] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const [droppedFile, setDroppedFile] = useState<File | null>(null);
+  const [wikiMd, setWikiMd] = useState("");
+  const [wikiLoading, setWikiLoading] = useState(false);
+  const [wikiYears, setWikiYears] = useState<number[]>([]);
+  const [wikiYear, setWikiYear] = useState<number | null>(null);
+  const [wikiMerged, setWikiMerged] = useState(true);
 
   const loadReports = useCallback(async () => {
     setLoading(true);
@@ -79,16 +90,22 @@ export function Report() {
     loadReports();
   }, [loadReports]);
 
-  const handleUpload = async () => {
+  const getUploadFile = (): File | null => {
+    if (droppedFile) return droppedFile;
     const files = fileRef.current?.files;
-    if (!files || files.length === 0) return;
+    return files && files.length > 0 ? files[0] : null;
+  };
+
+  const handleUpload = async () => {
+    const file = getUploadFile();
+    if (!file) return;
     setUploading(uploadYear);
     setError("");
     setStreamOpen(true);
     setStreamStatus("");
     setStreamWiki("");
     try {
-      await uploadReportStream(stockCode, stockName, uploadYear, files[0], {
+      await uploadReportStream(stockCode, stockName, uploadYear, file, {
         onStatus: (m) => setStreamStatus(m),
         onWikiChunk: (c) => setStreamWiki((w) => w + c),
         onData: (data) => {
@@ -100,11 +117,23 @@ export function Report() {
         onDone: () => setStreamStatus((s) => (s ? `${s} · 已完成` : "已完成")),
         onError: (m) => setError(m),
       });
+      setDroppedFile(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "上传失败");
     } finally {
       setUploading(null);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith(".pdf")) {
+      setDroppedFile(file);
+      const yearMatch = file.name.match(/(20[12]\d)/);
+      if (yearMatch) setUploadYear(parseInt(yearMatch[1], 10));
     }
   };
 
@@ -158,12 +187,43 @@ export function Report() {
     [reports]
   );
 
+  const loadWiki = useCallback(async (code: string, yr?: number) => {
+    setWikiLoading(true);
+    try {
+      const meta = await fetchWikiMeta(code);
+      setWikiYears([...meta.years].sort((a, b) => a - b));
+      if (yr) {
+        setWikiMerged(false);
+        setWikiYear(yr);
+        const text = await fetchWikiYear(code, yr);
+        setWikiMd(text);
+      } else {
+        setWikiMerged(true);
+        setWikiYear(null);
+        const text = await fetchWikiMerged(code);
+        setWikiMd(text);
+      }
+    } catch {
+      setWikiMd("");
+      setWikiYears([]);
+    } finally {
+      setWikiLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "wiki" && stockCode) {
+      void loadWiki(stockCode);
+    }
+  }, [tab, stockCode, loadWiki]);
+
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "数据总览" },
     { key: "growth", label: "收入与利润" },
     { key: "profit", label: "盈利能力" },
     { key: "structure", label: "财务结构" },
     { key: "insight", label: "综合分析" },
+    { key: "wiki", label: "知识库" },
   ];
 
   return (
@@ -211,16 +271,46 @@ export function Report() {
               </option>
             ))}
           </select>
-          <input ref={fileRef} type="file" accept=".pdf" />
           <button
             className="report-btn report-btn--primary"
             onClick={handleUpload}
-            disabled={uploading !== null}
+            disabled={uploading !== null || (!droppedFile && !(fileRef.current?.files?.length))}
           >
             {uploading !== null
               ? `分析中 (${uploading})…`
               : "上传并分析"}
           </button>
+        </div>
+
+        <div
+          className={`drop-zone${dragOver ? " drag-over" : ""}`}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileRef.current?.click()}
+        >
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) {
+                setDroppedFile(f);
+                const m = f.name.match(/(20[12]\d)/);
+                if (m) setUploadYear(parseInt(m[1], 10));
+              }
+            }}
+          />
+          <div className="drop-zone-icon">📄</div>
+          <p className="drop-zone-text">
+            {droppedFile ? "" : "拖拽PDF年报到此处，或点击选择文件"}
+          </p>
+          {droppedFile && (
+            <p className="drop-zone-file">{droppedFile.name}</p>
+          )}
+          <p className="drop-zone-hint">支持 .pdf 格式，文件名含年份可自动识别</p>
         </div>
       </div>
 
@@ -312,6 +402,36 @@ export function Report() {
               loading={analysisLoading}
               onRefresh={() => handleAnalyze(true)}
             />
+          )}
+          {tab === "wiki" && (
+            <div className="report-wiki-wrap">
+              <div className="wiki-year-actions" style={{ marginBottom: "1rem" }}>
+                <button
+                  type="button"
+                  className={wikiMerged ? "report-btn report-btn--accent" : "report-btn"}
+                  onClick={() => void loadWiki(stockCode)}
+                >
+                  合并视图
+                </button>
+                {wikiYears.map((y) => (
+                  <button
+                    key={y}
+                    type="button"
+                    className={!wikiMerged && wikiYear === y ? "report-btn report-btn--accent" : "report-btn"}
+                    onClick={() => void loadWiki(stockCode, y)}
+                  >
+                    {y}年
+                  </button>
+                ))}
+              </div>
+              {wikiLoading && <Spinner text="加载知识库…" />}
+              {!wikiLoading && wikiMd && <div className="panel wiki-md-panel"><MarkdownBody markdown={wikiMd} /></div>}
+              {!wikiLoading && !wikiMd && (
+                <p style={{ color: "var(--muted)", fontSize: "0.88rem" }}>
+                  暂无知识库内容，请先上传年报并等待 Wiki 生成。
+                </p>
+              )}
+            </div>
           )}
         </>
       )}

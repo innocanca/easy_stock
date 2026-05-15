@@ -139,6 +139,15 @@ export async function fetchStock(code: string): Promise<StockDetail | null> {
   return normalizeStockDetail(raw);
 }
 
+export interface PeHistoryPoint {
+  date: string;
+  pe: number;
+}
+
+export async function fetchPeHistory(code: string): Promise<PeHistoryPoint[]> {
+  return apiGet<PeHistoryPoint[]>(`/api/stocks/${encodeURIComponent(code)}/pe-history`);
+}
+
 export function fetchSectorList(): Promise<SectorBench[]> {
   return apiGet<SectorBench[]>("/api/sectors");
 }

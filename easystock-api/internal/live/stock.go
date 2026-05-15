@@ -9,6 +9,72 @@ import (
 	"easystock/api/internal/tushare"
 )
 
+// computeSectorAvgPe looks up the sector's average PE from the cached sector bundle.
+func computeSectorAvgPe(c *tushare.Client, industry string, date string) float64 {
+	if industry == "" {
+		return 0
+	}
+	names, err := StockBasicMap(c)
+	if err != nil {
+		return 0
+	}
+	rows, err := DailyBasicByTradeDate(c, date, "ts_code,pe_ttm")
+	if err != nil {
+		return 0
+	}
+	var peSum float64
+	var peN int
+	for _, row := range rows {
+		code := tushare.GetString(row, "ts_code")
+		pe := tushare.GetFloat(row, "pe_ttm")
+		if pe <= 0 || pe > 500 {
+			continue
+		}
+		sb := names[code]
+		if sb.Industry == industry {
+			peSum += pe
+			peN++
+		}
+	}
+	if peN == 0 {
+		return 0
+	}
+	return math.Round(peSum/float64(peN)*100) / 100
+}
+
+// computePePctHistory calculates the percentile of current PE among recent PE history.
+func computePePctHistory(c *tushare.Client, tsCode string, currentPe float64) int {
+	if currentPe <= 0 {
+		return 0
+	}
+	resp, err := c.Call("daily_basic", map[string]any{
+		"ts_code": tsCode,
+	}, "ts_code,pe_ttm")
+	if err != nil {
+		return 50
+	}
+	rows, err := tushare.RowsToMaps(resp)
+	if err != nil || len(rows) < 5 {
+		return 50
+	}
+	var below int
+	var total int
+	for _, row := range rows {
+		pe := tushare.GetFloat(row, "pe_ttm")
+		if pe <= 0 {
+			continue
+		}
+		total++
+		if pe < currentPe {
+			below++
+		}
+	}
+	if total == 0 {
+		return 50
+	}
+	return int(math.Round(float64(below) / float64(total) * 100))
+}
+
 // StockDetailJSON builds one stock payload aligned with easyStock StockDetail type.
 func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 	date, err := LatestTradeDate(c)
@@ -111,14 +177,17 @@ func StockDetailJSON(c *tushare.Client, tsCode string) ([]byte, error) {
 		fl = []map[string]any{}
 	}
 
+	sectorAvgPe := computeSectorAvgPe(c, sb.Industry, date)
+	pePctHistory := computePePctHistory(c, tsCode, pe)
+
 	detail := map[string]any{
 		"code":             tsCode,
 		"name":             name,
 		"sector":           sector,
 		"sectorId":         sectorID,
-		"sectorAvgPe":      20.0,
+		"sectorAvgPe":      sectorAvgPe,
 		"pe":               math.Round(pe*10) / 10,
-		"pePctHistory":     50,
+		"pePctHistory":     pePctHistory,
 		"pb":               math.Round(pb*100) / 100,
 		"roe":              math.Round(roe*10) / 10,
 		"roeSeries":        roeSeries,

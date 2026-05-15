@@ -105,6 +105,21 @@ func main() {
 		writeJSON(w, b)
 	})
 
+	mux.HandleFunc("GET /api/search", func(w http.ResponseWriter, r *http.Request) {
+		if tc == nil {
+			writeError(w, http.StatusServiceUnavailable, "TUSHARE_TOKEN is required")
+			return
+		}
+		q := r.URL.Query().Get("q")
+		b, err := live.SearchStocks(tc, q)
+		if err != nil {
+			log.Printf("search: %v", err)
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, b)
+	})
+
 	mux.HandleFunc("GET /api/stocks/{code}", func(w http.ResponseWriter, r *http.Request) {
 		code := r.PathValue("code")
 		if tc == nil {
@@ -124,12 +139,29 @@ func main() {
 		writeJSON(w, b)
 	})
 
+	mux.HandleFunc("GET /api/stocks/{code}/pe-history", func(w http.ResponseWriter, r *http.Request) {
+		code := r.PathValue("code")
+		if tc == nil {
+			writeError(w, http.StatusServiceUnavailable, "TUSHARE_TOKEN is required")
+			return
+		}
+		b, err := live.PeHistoryJSON(tc, code)
+		if err != nil {
+			log.Printf("pe-history %s: %v", code, err)
+			writeError(w, http.StatusBadGateway, tc.FormatErrWithTimeoutProbe(err))
+			return
+		}
+		writeJSON(w, b)
+	})
+
 	rh := report.NewHandler()
 	mux.HandleFunc("POST /api/reports/upload", rh.HandleUpload)
 	mux.HandleFunc("POST /api/reports/upload/stream", rh.HandleUploadStream)
 	mux.HandleFunc("GET /api/reports/{stock_code}", rh.HandleList)
 	mux.HandleFunc("GET /api/reports/{stock_code}/analysis", rh.HandleAnalysis)
 	mux.HandleFunc("DELETE /api/reports/{stock_code}/{year}", rh.HandleDelete)
+
+	mux.HandleFunc("POST /api/chat", rh.HandleChat)
 
 	mux.HandleFunc("GET /api/wiki", rh.HandleWikiList)
 	mux.HandleFunc("GET /api/wiki/{stock_code}/meta", rh.HandleWikiMeta)

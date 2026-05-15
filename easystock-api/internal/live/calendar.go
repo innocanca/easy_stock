@@ -10,21 +10,34 @@ import (
 	"easystock/api/internal/tushare"
 )
 
-// LatestTradeDate returns the most recent open trading day on SSE calendar (covers A-share calendar for most uses).
+// LatestTradeDate returns the most recent open trading day on SSE calendar
+// whose daily_basic data is likely available. Tushare publishes daily data
+// after ~18:00 CST, so before that cutoff we exclude today.
 func LatestTradeDate(c *tushare.Client) (string, error) {
 	if d := TradeDate(); d != "" {
 		return d, nil
 	}
-	end := time.Now().Format("20060102")
-	start := time.Now().AddDate(0, 0, -30).Format("20060102")
+
+	cst := time.FixedZone("CST", 8*3600)
+	now := time.Now().In(cst)
+
+	// Before 18:00 CST the current day's data is not yet published;
+	// use yesterday as the upper bound so we get the most recent day with data.
+	end := now
+	if now.Hour() < 18 {
+		end = now.AddDate(0, 0, -1)
+	}
+
+	endStr := end.Format("20060102")
+	startStr := end.AddDate(0, 0, -30).Format("20060102")
+
 	resp, err := c.Call("trade_cal", map[string]any{
 		"exchange":   "SSE",
-		"start_date": start,
-		"end_date":   end,
+		"start_date": startStr,
+		"end_date":   endStr,
 		"is_open":    "1",
 	}, "cal_date")
 	if err != nil {
-		// Optional fallback for restricted积分 / network
 		if fb := strings.TrimSpace(os.Getenv("TUSHARE_TRADE_DATE_FALLBACK")); fb != "" {
 			return fb, nil
 		}

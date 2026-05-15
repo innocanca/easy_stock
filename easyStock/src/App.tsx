@@ -8,6 +8,7 @@ import { Report } from "@/pages/Report";
 import { Wiki } from "@/pages/Wiki";
 import { Sector } from "@/pages/Sector";
 import { StockDetail } from "@/pages/StockDetail";
+import { Watchlist } from "@/pages/Watchlist";
 
 function SectorIndexRedirect() {
   const [target, setTarget] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export default function App() {
           <Route path="chain" element={<Chain />} />
           <Route path="report" element={<Report />} />
           <Route path="wiki" element={<Wiki />} />
+          <Route path="watchlist" element={<Watchlist />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

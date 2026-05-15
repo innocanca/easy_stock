@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import type { SectorBench, SectorRow } from "@shared/dataset";
 import { fetchSectorDetail, fetchSectorList } from "@/api/stockApi";
+import { Spinner } from "@/components/Spinner";
 
 function IconPeAscending({ className }: { className?: string }) {
   return (
@@ -269,12 +270,7 @@ export function Sector() {
   }
 
   if (sectors === null) {
-    return (
-      <>
-        <h1 className="page-title">板块</h1>
-        <p className="page-sub">加载中…</p>
-      </>
-    );
+    return <Spinner text="加载板块数据…" />;
   }
 
   const sector = bench;
