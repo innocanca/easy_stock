@@ -319,11 +319,11 @@ export function Sector() {
                 </div>
                 <div className="bench-card">
                   <div className="label">平均 ROE</div>
-                  <div className="value">{sector.avgRoe}%</div>
+                  <div className="value">{sector.avgRoe >= 0 ? `${sector.avgRoe}%` : "—"}</div>
                 </div>
                 <div className="bench-card">
                   <div className="label">营收增速（示意）</div>
-                  <div className="value">{sector.revGrowth}%</div>
+                  <div className="value">{sector.revGrowth >= 0 ? `${sector.revGrowth}%` : "—"}</div>
                 </div>
                 <div className="bench-card">
                   <div className="label">相对全市场 PE</div>
@@ -353,7 +353,7 @@ export function Sector() {
                           <Link to={`/stock/${encodeURIComponent(r.code)}`}>{r.name}</Link>
                         </td>
                         <td>{r.pe}</td>
-                        <td>{r.roe}%</td>
+                        <td>{r.roe >= 0 ? `${r.roe}%` : "—"}</td>
                         <td className={r.vsSectorPe >= 0 ? "positive" : "negative"}>
                           {r.vsSectorPe >= 0 ? "+" : ""}
                           {(r.vsSectorPe * 100).toFixed(0)}%

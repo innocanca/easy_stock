@@ -111,8 +111,8 @@ type picksFullCache struct {
 }
 
 var (
-	picksMu        sync.Mutex
-	picksCacheMap  = make(map[string]*picksFullCache) // key: styleID
+	picksMu       sync.Mutex
+	picksCacheMap = make(map[string]*picksFullCache) // key: styleID
 )
 
 // Per-stock financial data caches (24h TTL)
@@ -127,12 +127,46 @@ type profitsCacheEntry struct {
 }
 
 var (
-	finaSnapCache   = make(map[string]finaSnapCacheEntry)
-	finaSnapMu      sync.RWMutex
-	profitsCache    = make(map[string]profitsCacheEntry)
-	profitsMu       sync.RWMutex
-	finaCacheTTL    = 24 * time.Hour
+	finaSnapCache = make(map[string]finaSnapCacheEntry)
+	finaSnapMu    sync.RWMutex
+	profitsCache  = make(map[string]profitsCacheEntry)
+	profitsMu     sync.RWMutex
+	finaCacheTTL  = 24 * time.Hour
 )
+
+// Very small token-bucket limiter to avoid Tushare频率超限（例如 income 200次/分钟）。
+// We only gate the most chatty per-stock endpoints used by /api/picks.
+type callLimiter struct {
+	tokens chan struct{}
+}
+
+func newCallLimiter(perMinute int, burst int) *callLimiter {
+	if perMinute < 1 {
+		perMinute = 1
+	}
+	if burst < 1 {
+		burst = 1
+	}
+	l := &callLimiter{tokens: make(chan struct{}, burst)}
+	for i := 0; i < burst; i++ {
+		l.tokens <- struct{}{}
+	}
+	interval := time.Minute / time.Duration(perMinute)
+	tk := time.NewTicker(interval)
+	go func() {
+		for range tk.C {
+			select {
+			case l.tokens <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return l
+}
+
+func (l *callLimiter) Take() { <-l.tokens }
+
+var finaIndicatorLimiter = newCallLimiter(180, 8)
 
 // WarmUpPicks pre-builds the picks cache in a background goroutine so the
 // first user request doesn't have to wait.
@@ -460,7 +494,11 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 	closePrice := tushare.GetFloat(r.m, "close")
 
 	fi := fetchFinaSnap(c, code)
-	profitPts, incErr := fetchQuarterlyProfitsYi(c, code)
+	// Quarterly income is expensive (per-stock) and is the main source of rate-limit
+	// failures while building the full picks list. We intentionally skip it here and
+	// fall back to synthetic trends.
+	var profitPts []qProfit
+	var incErr error
 
 	val := dimValue(fi)
 	valu := dimValuation(pe, medianPe)
@@ -508,6 +546,8 @@ func buildOnePick(c *tushare.Client, names map[string]StockBasicRow, tradeDate s
 	}
 	if incErr != nil {
 		note += fmt.Sprintf(" 季度利润表不可用（%v），走势图用市值缩放占位。", incErr)
+	} else if len(profitPts) == 0 {
+		note += " 季度利润表未加载，走势图用市值缩放占位。"
 	} else {
 		note += " 利润为合并报表归属净利（亿元，最近至多四季）；PE 走势按当期 PE 与历史季度利润比例回溯近似。"
 	}
@@ -538,6 +578,7 @@ func fetchFinaSnap(c *tushare.Client, tsCode string) finaSnap {
 	}
 	finaSnapMu.RUnlock()
 
+	finaIndicatorLimiter.Take()
 	resp, err := c.Call("fina_indicator", map[string]any{
 		"ts_code": tsCode,
 	}, "ts_code,end_date,roe,grossprofit_margin,debt_to_assets,netprofit_margin,netprofit_yoy,tr_yoy")
